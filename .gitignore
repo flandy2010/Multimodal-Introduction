@@ -2,3 +2,6 @@
 
 # data
 data/MNIST/
+
+# ckpt
+diffusion_mode/ckpt
