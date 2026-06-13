@@ -1,7 +1,8 @@
 .idea/
+__pycache__/
 
 # data
 data/MNIST/
 
 # ckpt
-diffusion_mode/ckpt
+diffusion_model/ckpt/
