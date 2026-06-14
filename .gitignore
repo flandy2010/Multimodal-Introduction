@@ -7,3 +7,4 @@ data/MNIST/
 # ckpt
 diffusion_model/ckpt/
 diffusion_model_CFG/ckpt/
+flow_matching_model_CFG/ckpt/
