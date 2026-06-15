@@ -51,6 +51,22 @@ def modulate(x, shift, scale):
     return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
 
 
+class PositionalEncoding(nn.Module):
+    def __init__(self, max_seq_len: int, d_model: int):
+        super().__init__()
+        assert d_model % 2 == 0
+        pe = torch.zeros(max_seq_len, d_model)
+        pos = torch.arange(0, max_seq_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+        pe[:, 0::2] = torch.sin(pos * div_term)
+        pe[:, 1::2] = torch.cos(pos * div_term)
+        self.register_buffer('pe', pe)
+
+    def forward(self, t):
+        # t: [batch_size] 整数索引
+        return self.pe[t]
+
+
 # --- 3. DiT Block: 核心 Transformer 块 ---
 class DiTBlock(nn.Module):
     def __init__(self, hidden_size, num_heads):
@@ -94,6 +110,7 @@ class DiT(nn.Module):
         input_size, patch_size, in_channels, hidden_size = cfg.dit.input_size, cfg.dit.patch_size, cfg.dit.in_channels, cfg.dit.hidden_size
         depth, num_heads = cfg.dit.depth, cfg.dit.num_heads
         num_classes = cfg.data.num_classes
+        n_steps = cfg.method.n_steps
 
         self.in_channels = cfg.dit.in_channels
         self.patch_size = patch_size
@@ -127,6 +144,8 @@ class DiT(nn.Module):
             nn.Linear(hidden_size, 2 * hidden_size)
         )
 
+        self.t_pe = PositionalEncoding(n_steps, hidden_size)
+
         # 初始化
         self.initialize_weights()
 
@@ -154,7 +173,9 @@ class DiT(nn.Module):
 
         # 2. 条件融合 (这里简单处理：将 t 和 c 的嵌入相加)
         c_vec = self.c_embedder(c.view(-1))
-        t_vec = self.t_embedder(torch.randn(B, 128, device=x.device))  # 占位
+
+        t_pe = self.t_pe(t.view(-1))  # 得到频率编码 [B, D]
+        t_vec = self.t_embedder(t_pe)  # 经过 MLP 映射 [B, D]
 
         # cond.shape = [B, D]
         cond = t_vec + c_vec
@@ -228,7 +249,7 @@ if __name__ == "__main__":
 
     model = DiT(cfg)
     x = torch.randn(8, 1, 28, 28)
-    t = torch.randn(8, 128)  # 假设时间已经转为向量
+    t = torch.randint(0, 1000, (8, 1))
     c = torch.randint(0, 10, (8, 1))
 
     out = model(x, t, c)
