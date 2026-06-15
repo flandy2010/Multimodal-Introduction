@@ -1,6 +1,6 @@
 # Flow Matching Model
 
-本章在扩散模型&CFG的nano手搓版本基础上，通过修改训练目标和推理代码，将其改成flow matching model。
+本章在扩散模型&CFG的nano手搓版本基础上，通过修改训练目标和推理代码，将其改成flow matching的训练方式。
 
 
 # 环境依赖
@@ -20,7 +20,7 @@ pip install -r requirements.txt
 ├── README.md
 ├── data
 │   └── MNIST
-└── diffusion_model
+└── 03_guided_flow_matching
     ├── README.md
     ├── ckpt
     │   └── checkpoint_epoch_100.pth

@@ -19,7 +19,7 @@ pip install -r requirements.txt
 ├── README.md
 ├── data
 │   └── MNIST
-└── diffusion_model
+└── 01_diffusion_model
     ├── README.md
     ├── ckpt
     │   └── checkpoint_epoch_050.pth
