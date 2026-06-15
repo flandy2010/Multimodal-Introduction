@@ -38,7 +38,7 @@ pip install -r requirements.txt
 ## 数据下载
 使用python脚本可以下载MNIST手写数字识别数据集：
 ```shell
-# cd diffusion_model
+# cd 01_diffusion_model
 python download_dataset.py
 ```
 ![example](./example/mnist_visualize.png)

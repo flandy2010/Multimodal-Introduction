@@ -4,7 +4,7 @@
 - 在模型选型上，支持UNet，Diffusion Transformer模型
 - 在训练方式上，支持DDPM和Flow Matching
 
-同时默认开启CFG
+模型上增加对于Diffusion Transformer的支持，但暂时不开启VAE，默认开启CFG
 
 # 环境依赖
 ```shell
