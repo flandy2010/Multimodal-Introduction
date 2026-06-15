@@ -5,6 +5,7 @@ __pycache__/
 data/MNIST/
 
 # ckpt
-diffusion_model/ckpt/
-diffusion_model_CFG/ckpt/
-flow_matching_model_CFG/ckpt/
+01_diffusion_model/ckpt/
+02_guided_diffusion_model/ckpt/
+03_guided_flow_matching/ckpt/
+04_diffusion_transformer/runs/
