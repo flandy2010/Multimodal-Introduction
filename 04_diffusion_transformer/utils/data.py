@@ -49,7 +49,7 @@ def denormalize(tensor):
 
 
 # --- 4. 图像显示辅助函数 ---
-def show_images(images, labels, num_rows=2, num_cols=5, title="Samples"):
+def show_images(images, num_rows=2, num_cols=5, title="Samples", sub_titles=[]):
     """
     images: shape [batch, channels, h, w]
     """
@@ -59,6 +59,9 @@ def show_images(images, labels, num_rows=2, num_cols=5, title="Samples"):
     # 确保 images 在 CPU 上
     images = images.cpu()
 
+    if not sub_titles:
+        sub_titles = ["null" for _ in range(len(axes.flat))]
+
     for i, ax in enumerate(axes.flat):
         if i < len(images):
             # 1. 逆归一化
@@ -67,7 +70,7 @@ def show_images(images, labels, num_rows=2, num_cols=5, title="Samples"):
             img = img.permute(1, 2, 0).squeeze().numpy()
 
             ax.imshow(img, cmap='gray' if img.ndim == 2 else None)
-            ax.set_title(f"L: {labels[i].item()}", fontsize=10)
+            ax.set_title(f"Label: {sub_titles[i]}", fontsize=10)
             ax.axis('off')
 
     plt.tight_layout()

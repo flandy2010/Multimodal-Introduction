@@ -14,7 +14,7 @@ from models.dit import DiT  # 假设以后有了
 from core.fm_engine import FlowMatchingEngine
 from core.ddpm_engine import DDPMEngine
 from config import get_config, update_config
-from utils.data import get_dataloader
+from utils.data import get_dataloader, show_images
 from utils.logger import setup_experiment, load_config_from_dir
 
 
@@ -110,6 +110,18 @@ def sample(model, engine, cfg, exp_dir):
         )
 
     samples = (samples * 0.5 + 0.5).clamp(0, 1)
+
+    if cfg.inference.infer_mode == "zip":
+        show_images(
+            samples, num_rows=1, num_cols=len(labels),title="Samples",
+            sub_titles=[f"Num={label} & Scale={scale}" for label, scale in zip(labels, scales)],
+        )
+    elif cfg.inference.infer_mode == "product":
+        show_images(
+            samples, num_rows=len(cfg.inference.infer_labels), num_cols=len(cfg.inference.infer_scales), title="Samples",
+            sub_titles=[f"Num={label} & Scale={scale}" for label, scale in zip(labels, scales)],
+        )
+
 
 
 def parse_args():
