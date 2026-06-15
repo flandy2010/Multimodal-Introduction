@@ -33,7 +33,7 @@ def get_config():
         type="flow_matching",  # flow_matching / ddpm
         n_steps=1000,  # 训练步数 (对于 FM 是时间映射尺度)
         n_classes=11,
-        sample_steps=50,  # 推理步数
+        sample_steps=20,  # 推理步数
         cfg_scale=4.0,  # CFG 引导强度
         batch_size=512,
         lr=1e-3,
@@ -48,9 +48,11 @@ def get_config():
         residual=True
     )
 
-    # --- DiT 模型配置 (预留) ---
+    # --- DiT 模型配置 ---
     cfg.dit = SimpleNamespace(
+        input_size=28,
         patch_size=2,
+        in_channels=1,
         hidden_size=128,
         depth=6,
         num_heads=4
@@ -74,6 +76,7 @@ def update_config(cfg, args):
 
     if args.n_steps: cfg.method.n_steps = args.n_steps
     if args.n_classes: cfg.method.n_classes = args.n_classes
+    if args.sample_steps: cfg.method.sample_steps = args.sample_steps
 
     if args.device: cfg.common.device = args.device
 

@@ -114,14 +114,14 @@ def sample(model, engine, cfg, exp_dir):
     if cfg.inference.infer_mode == "zip":
         show_images(
             samples, num_rows=1, num_cols=len(labels),title="Samples",
-            sub_titles=[f"Num={label} & Scale={scale}" for label, scale in zip(labels, scales)],
+            sub_titles=[f"Num={label}, Scale={scale}" for label, scale in zip(labels, scales)],
         )
     elif cfg.inference.infer_mode == "product":
         show_images(
-            samples, num_rows=len(cfg.inference.infer_labels), num_cols=len(cfg.inference.infer_scales), title="Samples",
-            sub_titles=[f"Num={label} & Scale={scale}" for label, scale in zip(labels, scales)],
+            samples, num_rows=len(cfg.inference.infer_labels), num_cols=len(cfg.inference.infer_scales),
+            sub_titles=[f"Num={label}, Scale={scale}" for label, scale in zip(labels, scales)],
+            title=f"Model: {cfg.model_type} Method: {cfg.method.type}, SampleSteps: {cfg.method.sample_steps}",
         )
-
 
 
 def parse_args():
@@ -129,9 +129,10 @@ def parse_args():
     parser = argparse.ArgumentParser(description="MiniGen Project")
     parser.add_argument("--mode", type=str, choices=["train", "sample"])
     parser.add_argument("--method", type=str, choices=["ddpm", "flow_matching"])
-    parser.add_argument("--n_steps", type=int, help="number of iteration steps")
+    parser.add_argument("--n_steps", type=int, help="number of training iteration steps")
     parser.add_argument("--n_classes", type=int, help="number of classes")
     parser.add_argument("--s", type=float, help="CFG scale")
+    parser.add_argument("--sample_steps", type=int, help="number of inference iteration steps")
 
     parser.add_argument("--model", type=str, choices=["unet", "dit"])
     parser.add_argument("--lr", type=float)

@@ -70,7 +70,7 @@ def show_images(images, num_rows=2, num_cols=5, title="Samples", sub_titles=[]):
             img = img.permute(1, 2, 0).squeeze().numpy()
 
             ax.imshow(img, cmap='gray' if img.ndim == 2 else None)
-            ax.set_title(f"Label: {sub_titles[i]}", fontsize=10)
+            ax.set_title(sub_titles[i], fontsize=10)
             ax.axis('off')
 
     plt.tight_layout()
