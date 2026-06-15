@@ -16,10 +16,8 @@ pip install -r requirements.txt
 # 项目结构
 预期项目结构如下：
 ```text
-MiniGen/
+04_diffusion_transformer/
 ├── configs.py           # 核心：使用 Namespace 或字典存储所有超参数
-├── train.py             # 负责模型训练
-├── inference.py         # 负责模型推理
 ├── main.py              # 入口：负责训练和推理的调度
 ├── core/
 │   ├── __init__.py
@@ -33,7 +31,7 @@ MiniGen/
 ├── utils/
 │   ├── data.py          # 数据加载
 │   └── logger.py        # 进度条和可视化
-└── ckpts/               # 存放权重
+└── runs/                # 训练记录
 ```
 
 # 使用介绍
