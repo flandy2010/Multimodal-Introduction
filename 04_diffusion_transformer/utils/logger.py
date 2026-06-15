@@ -5,11 +5,35 @@ from types import SimpleNamespace
 from torch.utils.tensorboard import SummaryWriter
 
 
-def dict_to_namespace(d):
-    """递归将字典转回 SimpleNamespace"""
-    if isinstance(d, dict):
-        return SimpleNamespace(**{k: dict_to_namespace(v) for k, v in d.items()})
-    return d
+def namespace_to_dict(obj):
+    """递归将 SimpleNamespace 转为 dict"""
+    if isinstance(obj, SimpleNamespace):
+        # vars(obj) 可以获取 Namespace 内部的字典
+        return {k: namespace_to_dict(v) for k, v in vars(obj).items()}
+    elif isinstance(obj, list):
+        return [namespace_to_dict(item) for item in obj]
+    else:
+        return obj
+
+def dict_to_namespace(obj):
+    """递归将 dict 转为 SimpleNamespace"""
+    if isinstance(obj, dict):
+        return SimpleNamespace(**{k: dict_to_namespace(v) for k, v in obj.items()})
+    elif isinstance(obj, list):
+        return [dict_to_namespace(item) for item in obj]
+    else:
+        return obj
+
+
+def load_config_from_dir(exp_dir):
+    config_path = os.path.join(exp_dir, "config.json")
+    with open(config_path, "r") as f:
+        cfg_dict = json.load(f)  # 此时得到的是 dict
+
+    # 将 dict 重新转回 SimpleNamespace 使得 .common 操作合法
+    cfg = dict_to_namespace(cfg_dict)
+    return cfg
+
 
 def setup_experiment(cfg):
 
@@ -21,10 +45,9 @@ def setup_experiment(cfg):
     os.makedirs(os.path.join(exp_dir, "checkpoints"), exist_ok=True)
     os.makedirs(os.path.join(exp_dir, "samples"), exist_ok=True)
 
-    # 将配置保存为 JSON，方便以后复现
-    # 注意：SimpleNamespace 需要转为 dict
     with open(os.path.join(exp_dir, "config.json"), "w") as f:
-        # 递归转换函数省略，简单处理：
-        json.dump(str(cfg), f, indent=4)
+        # 先转成字典，再存 JSON
+        cfg_dict = namespace_to_dict(cfg)
+        json.dump(cfg_dict, f, indent=4)
 
     return exp_dir

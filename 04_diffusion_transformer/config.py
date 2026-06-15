@@ -14,6 +14,11 @@ def get_config():
         mode="train"  # train / sample
     )
 
+    # --- 推理配置 ---
+    cfg.inference = SimpleNamespace(
+        infer_mode="zip",
+    )
+
     # --- 数据集配置 ---
     cfg.data = SimpleNamespace(
         name="MNIST",
@@ -71,6 +76,10 @@ def update_config(cfg, args):
     if args.n_classes: cfg.method.n_classes = args.n_classes
 
     if args.device: cfg.common.device = args.device
+
+    if args.infer_mode: cfg.inference.infer_mode = args.infer_mode
+    if args.infer_labels: cfg.inference.infer_labels = args.infer_labels
+    if args.infer_scales: cfg.inference.infer_scales = args.infer_scales
 
     # 特殊处理ddpm下的min_beta和max_beta
     if args.min_beta: cfg.method.min_beta = args.min_beta

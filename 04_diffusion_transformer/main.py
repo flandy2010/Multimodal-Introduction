@@ -1,7 +1,9 @@
+import os
 import time
 import torch
 import torch.nn as nn
 import argparse
+import itertools
 from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
 from torchvision.utils import save_image, make_grid
@@ -13,7 +15,7 @@ from core.fm_engine import FlowMatchingEngine
 from core.ddpm_engine import DDPMEngine
 from config import get_config, update_config
 from utils.data import get_dataloader
-from utils.logger import setup_experiment
+from utils.logger import setup_experiment, load_config_from_dir
 
 
 def train(model, engine, cfg, exp_dir):
@@ -78,8 +80,36 @@ def train(model, engine, cfg, exp_dir):
 
     writer.close()
 
-def sample():
-    pass
+def sample(model, engine, cfg, exp_dir):
+
+    ckpt_path = f"{exp_dir}/checkpoints/last.pth"
+    state_dict = torch.load(ckpt_path, map_location=cfg.common.device)
+
+    model.load_state_dict(state_dict)
+    model = model.to(cfg.common.device)
+
+    labels = cfg.inference.infer_labels
+    scales = cfg.inference.infer_scales
+    if cfg.inference.infer_mode == "zip":
+        assert len(labels) == len(scales), f"[ERROR] when infer_model='zip', length of labels({len(labels)}) and scales({len(scales)}) should be equal"
+    elif cfg.inference.infer_mode == "product":
+        temp = list(itertools.product(labels, scales))
+        labels = [p[0] for p in temp]
+        scales = [p[1] for p in temp]
+    else:
+        raise ValueError(f"Unknown pair_mode: {cfg.inference.infer_mode}")
+
+    batch_size = len(labels)
+
+    with torch.no_grad():
+        samples = engine.sample(
+            model,
+            shape=(batch_size, *cfg.data.img_shape),
+            c=labels,
+            scale=scales,
+        )
+
+    samples = (samples * 0.5 + 0.5).clamp(0, 1)
 
 
 def parse_args():
@@ -104,16 +134,17 @@ def parse_args():
     parser.add_argument("--channels", type=int, nargs='+', help="UNet channels list")
 
     # 支持在推理的时候自定义测试数据
+    parser.add_argument("--exp_dir", type=str, help="Model Checkpoint dir")
+    parser.add_argument("--infer_mode", type=str, default="product", choices=["zip", "product"])
     parser.add_argument("--infer_labels", type=int, nargs='+', default=[1, 2, 3])
     parser.add_argument("--infer_scales", type=float, nargs='+', default=[0.0, 0.5, 1.0, 2.5, 5.0, 10.0])
 
     return parser.parse_args()
 
 
-def main():
+def run_train(args):
 
     cfg = get_config()
-    args = parse_args()
     cfg = update_config(cfg, args)
 
     exp_dir = setup_experiment(cfg)
@@ -133,10 +164,41 @@ def main():
         engine = DDPMEngine(cfg)
 
     # 4. 执行任务
-    if cfg.common.mode == "train":
-        train(model, engine, cfg, exp_dir)
-    elif cfg.common.mode == "sample":
-        sample(model, engine, cfg, exp_dir)
+    train(model, engine, cfg, exp_dir)
+
+
+def run_sample(args):
+
+    cfg = load_config_from_dir(args.exp_dir)
+    cfg = update_config(cfg, args)
+
+    if cfg.model_type == "unet":
+        model = UNet(cfg)
+    elif cfg.model_type == "dit":
+        model = DiT(cfg)  # DiT 也可以设计成接收 cfg
+
+    ckpt_path = os.path.join(args.exp_dir, "checkpoints/last.pth")
+    state_dict = torch.load(ckpt_path, map_location=cfg.common.device)
+    model.load_state_dict(state_dict)
+    model.to(cfg.common.device)
+
+
+    # 3. 选择算法引擎
+    if cfg.method.type == "flow_matching":
+        engine = FlowMatchingEngine(cfg)
+    else:
+        engine = DDPMEngine(cfg)
+
+    sample(model, engine, cfg, args.exp_dir)
+
+
+def main():
+
+    args = parse_args()
+    if args.mode == "train":
+        run_train(args)
+    elif args.mode == "sample":
+        run_sample(args)
 
 
 if __name__ == "__main__":

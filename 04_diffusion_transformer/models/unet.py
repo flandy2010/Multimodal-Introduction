@@ -183,6 +183,11 @@ class UNet(nn.Module):
         eps_out = self.forward(combined_x, combined_t, combined_c)
         eps_uncond, eps_cond = eps_out.chunk(2, dim=0)
 
+        if isinstance(s, list):
+            assert len(s) == eps_uncond.shape[0]
+            s = torch.FloatTensor(s).view(-1, 1, 1, 1)
+            s = s.to(eps_out.device)
+
         return eps_uncond + s * (eps_cond - eps_uncond)
 
 
