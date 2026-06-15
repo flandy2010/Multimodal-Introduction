@@ -35,3 +35,25 @@ MiniGen/
 │   └── logger.py        # 进度条和可视化
 └── ckpts/               # 存放权重
 ```
+
+# 使用介绍
+
+### 模型训练
+```shell
+# 使用DDPM + UNet
+python main.py --mode train --method ddpm --model unet --lr 0.0002 --batch 128 --channels 64 128 256 512 --device mps
+
+# 使用DDPM + DiT
+
+# 使用FlowMatching + DiT
+```
+
+### 模型推理
+通过指定训练记录文件夹，自动读入配置，并根据输入的测试数据进行推理。
+```shell
+python main.py --mode sample --exp_dir runs/{model_name} --infer_labels 0 1 2 --infer_scales 1.0 4.0 10.0
+```
+
+# 效果展示
+
+# 踩坑记录
