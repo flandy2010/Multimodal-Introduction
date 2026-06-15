@@ -85,7 +85,7 @@ python main.py --mode sample --infer_mode product --exp_dir runs/{model_name} --
 
 # 结果展示
 看起来感觉是【UNet + FM + sample_step=1000】最优，【DiT + FM + sample_step=50】次之啊。感觉DiT果然还是有点不好训的，或者说还得调调参数啥的。
-而且可能因为训练量不太够，或者是加了引导的原因？scale=0的时候图片效果都比较差
+而且可能因为训练量不太够，或者是加了引导的原因？scale=0的时候图片效果都比较差。
 
 ### UNet + DDPM + sample_step=1000
 ![unet_ddpm_step1000](./examples/unet_ddpm_step1000.png)
@@ -100,3 +100,9 @@ python main.py --mode sample --infer_mode product --exp_dir runs/{model_name} --
 ![dit_fm_step1000](./examples/dit_fm_step50.png)
 
 # 踩坑记录
+
+### 低分辨率上DiT vs UNet
+和claude的老师聊了一会儿，他认为在低分辨率图片上，图像特征主要是局部的、简单的边缘和线条。
+所以UNet这种自带“归纳偏置”的模型是有优势的。
+DiT 没有任何关于“图像”的先验知识。它把图片看成 196 个 Token，它必须通过大量训练去“悟出”左上角的 Token 和它旁边的 Token 应该是连在一起的。
+在同样的训练时长下，UNet 已经开始打磨细节了，而 DiT 可能还在巩固空间结构的逻辑。
