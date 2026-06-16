@@ -10,7 +10,7 @@ from torchvision.utils import save_image, make_grid
 
 
 from models.unet import UNet
-from models.dit import DiT  # 假设以后有了
+from models.dit import DiT
 from core.fm_engine import FlowMatchingEngine
 from core.ddpm_engine import DDPMEngine
 from config import get_config, update_config
