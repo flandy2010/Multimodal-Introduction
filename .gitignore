@@ -10,3 +10,4 @@ data/MNIST/
 02_guided_diffusion_model/ckpt/
 03_guided_flow_matching/ckpt/
 04_diffusion_transformer/runs/
+05_video_generation/runs/
