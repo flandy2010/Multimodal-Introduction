@@ -129,7 +129,7 @@ if __name__ == "__main__":
         common=SimpleNamespace(mode="train", num_workers=0),
         data=SimpleNamespace(root="../data"),
         method=SimpleNamespace(batch_size=10),
-        video=SimpleNamespace(num_frames=20)
+        video=SimpleNamespace(num_frames=16)
     )
 
     try:
@@ -147,7 +147,7 @@ if __name__ == "__main__":
         print(f"labels.shape = {labels.shape}")
 
         engine = VideoTransformEngine()
-        save_path = engine.save_to_grid_image(videos[0], labels[0].item(), texts[0])
+        save_path = engine.save_to_grid_image(videos[0], inst_text=texts[0], save_dir="./examples", cell_size=(28, 28))
         print(f"save result of \'{texts[0]}\' to: {save_path}")
 
     except Exception as e:

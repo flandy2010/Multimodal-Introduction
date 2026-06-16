@@ -27,13 +27,12 @@ def get_config():
         img_size=28,
         img_shape=(1, 28, 28),
         in_channels=1,
-        num_frames=16,
         vocab_size=32,
     )
 
     cfg.video = SimpleNamespace(
         num_frames=16,
-        video_shape=(16, 1, 28, 28),
+        frame_shape=(1, 28, 28),
     )
 
     # --- 训练/采样算法配置 ---
@@ -83,7 +82,7 @@ def update_config(cfg, args):
     if args.s: cfg.method.cfg_scale = args.s
 
     if args.n_steps: cfg.method.n_steps = args.n_steps
-    if args.n_classes: cfg.method.n_classes = args.n_classes
+    if args.num_frames: cfg.video.num_frames = args.num_frames
     if args.sample_steps: cfg.method.sample_steps = args.sample_steps
 
     if args.device: cfg.common.device = args.device

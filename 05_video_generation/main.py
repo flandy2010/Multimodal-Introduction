@@ -1,12 +1,9 @@
 import os
-import time
 import torch
 import torch.nn as nn
 import argparse
-import itertools
 from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
-from torchvision.utils import save_image, make_grid
 
 
 from models.unet import UNet
@@ -39,7 +36,7 @@ def train(model, engine, cfg, exp_dir):
 
             # item: dict, keys=["video", "inst_ids", "inst_text", "label"]
             # video.shape=[B, F, C, H, W], inst_ids.shape=[B, L=10]
-            video, inst_ids = item["video"], item["inst_ids"]
+            video, inst_ids, inst_texts = item["video"], item["inst_ids"], item["inst_text"]
             video, inst_ids = video.to(cfg.common.device), inst_ids.to(cfg.common.device)
 
             video_t, t, target, cond_ids = engine.get_train_data(video, inst_ids)
@@ -72,23 +69,24 @@ def train(model, engine, cfg, exp_dir):
             with torch.no_grad():
                 samples = engine.sample(
                     model,
-                    shape=(len(instructions), *cfg.video.video_shape),
+                    shape=(len(instructions), cfg.video.num_frames, *cfg.video.frame_shape),
                     c=inst_ids,
                     scale=cfg.method.cfg_scale
                 )
                 samples = samples.detach().cpu()
-                epoch = 0
                 for instruction, sample in zip(instructions, samples):
                     VideoTransformEngine.save_to_grid_image(
                         video_tensor=sample,
                         inst_text=f"epoch_{epoch}_{instruction}",
-                        save_dir=f"{exp_dir}/samples/"
+                        save_dir=f"{exp_dir}/samples/",
+                        cell_size=(28, 28)
                     )
 
             # 保存权重
             torch.save(model.state_dict(), f"{exp_dir}/checkpoints/last.pth")
 
     writer.close()
+
 
 def sample(model, engine, cfg, exp_dir):
 
@@ -98,7 +96,26 @@ def sample(model, engine, cfg, exp_dir):
     model.load_state_dict(state_dict)
     model = model.to(cfg.common.device)
 
-    # TODO
+    tokenizer = CharTokenizer()
+
+    instructions = ["将2水平翻转", "将4垂直翻转", "将5放大1倍", "将7缩小2倍", "将9旋转30度", "将1旋转120度"]
+    inst_ids = tokenizer.encode_batch(instructions, return_tensor=True)
+
+    with torch.no_grad():
+        samples = engine.sample(
+            model,
+            shape=(len(instructions), cfg.video.num_frames, *cfg.video.frame_shape),
+            c=inst_ids,
+            scale=cfg.method.cfg_scale
+        )
+        samples = samples.detach().cpu()
+        for instruction, sample in zip(instructions, samples):
+            VideoTransformEngine.save_to_grid_image(
+                video_tensor=sample,
+                inst_text=f"ret_{instruction}",
+                save_dir=f"{exp_dir}/result/",
+                cell_size=(28, 28)
+            )
 
 
 def parse_args():
@@ -107,7 +124,7 @@ def parse_args():
     parser.add_argument("--mode", type=str, choices=["train", "sample"])
     parser.add_argument("--method", type=str, choices=["ddpm", "flow_matching"])
     parser.add_argument("--n_steps", type=int, help="number of training iteration steps")
-    parser.add_argument("--n_classes", type=int, help="number of classes")
+    parser.add_argument("--num_frames", type=int, help="number of frames")
     parser.add_argument("--s", type=float, help="CFG scale")
     parser.add_argument("--sample_steps", type=int, help="number of inference iteration steps")
 
@@ -140,7 +157,11 @@ def run_train(args):
     cfg = get_config()
     cfg = update_config(cfg, args)
 
-    exp_dir = setup_experiment(cfg)
+    if args.exp_dir:
+        exp_dir = args.exp_dir
+    else:
+        exp_dir = setup_experiment(cfg)
+
     print(f"[INFO] Experiment log will be saved to: {exp_dir}")
 
     if cfg.model_type == "unet":
@@ -149,6 +170,14 @@ def run_train(args):
         model = DiT(cfg)  # DiT 也可以设计成接收 cfg
 
     model.to(cfg.common.device)
+    if args.exp_dir and os.path.exists(os.path.join(exp_dir, "checkpoints/last.pth")):
+        ckpt_path = os.path.join(exp_dir, "checkpoints/last.pth")
+        state_dict = torch.load(ckpt_path, map_location=cfg.common.device)
+        model.load_state_dict(state_dict)
+        model.to(cfg.common.device)
+        print(f"[INFO] Checkpoint loaded from: {ckpt_path}")
+    else:
+        print(f"[INFO] Training from scratch")
 
     # 3. 选择算法引擎
     if cfg.method.type == "flow_matching":

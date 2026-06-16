@@ -184,8 +184,9 @@ if __name__ == '__main__':
 
     engine = VideoTransformEngine()
     image = create_synthetic_five()
+    print(">>> Image.shape:", image.shape)  # [1, 28, 28]
 
     for instruction in ["放大3倍", "缩小2倍", "水平翻转", "垂直翻转", "旋转60度"]:
         video_tensor = engine.transform_to_tensor(image, instruction, num_frames=30)
         # engine.save_to_mp4(video_tensor, 5, instruction)
-        engine.save_to_grid_image(video_tensor, f"将5{instruction}")
+        engine.save_to_grid_image(video_tensor, f"将5{instruction}", cell_size=(28, 28))

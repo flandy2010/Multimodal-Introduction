@@ -28,7 +28,7 @@
 - 训练效果：DiT + FlowMatching + sample_step=50
 ![result](04_diffusion_transformer/examples/dit_fm_step50.png)
 
-### [TODO] Vedio Generation
+### [TODO] Video Generation
 基于Diffusion Transformer结构进行实验，带CFG但考虑到数据集分辨率较低暂时不使用VAE结构。使用工程化方案基于现有的图片进行视频生成：
 - 原始素材：MNIST手写数据集
 - 加工方式：图片缩放，图片翻转，图片旋转

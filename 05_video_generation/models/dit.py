@@ -178,7 +178,7 @@ class DiT(nn.Module):
         self.register_buffer("pos_embed", torch.from_numpy(pos_embed).float().unsqueeze(0))
 
         # C2. 帧位置编码（参与训练）
-        self.temporal_pos_embed = nn.Parameter(torch.zeros(1, cfg.data.num_frames, hidden_size))
+        self.temporal_pos_embed = nn.Parameter(torch.zeros(1, cfg.video.num_frames, hidden_size))
 
         # D. Transformer Blocks
         self.blocks = nn.ModuleList([
