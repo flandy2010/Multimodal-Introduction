@@ -20,12 +20,13 @@
 - 训练效果：
 ![result](03_guided_flow_matching/example/inference_visualize.png)
 
-### [TODO] DiT & CFG
+### [2026-06-15] DiT & CFG
 基于Diffusion Transformer结构进行实验，带CFG但考虑到数据集分辨率较低暂时不使用VAE结构。
 同时实现一个可以复用的训练框架，支持DiT，UNet等不同格式，支持DDPM和Flow Matching训练，
 - 实现记录：[Nano-Flow-Matching-CFG](https://github.com/flandy2010/Multimodal-Introduction/blob/main/04_diffusion_transformer/README.md)
 - 训练数据：MNIST手写数据集
-- 训练效果：TODO
+- 训练效果：DiT + FlowMatching + sample_step=50
+![result](04_diffusion_transformer/examples/dit_fm_step50.png)
 
 ### [TODO] Vedio Generation
 基于Diffusion Transformer结构进行实验，带CFG但考虑到数据集分辨率较低暂时不使用VAE结构。使用工程化方案基于现有的图片进行视频生成：
