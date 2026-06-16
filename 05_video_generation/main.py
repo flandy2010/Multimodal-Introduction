@@ -26,6 +26,18 @@ def train(model, engine, cfg, exp_dir):
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg.method.lr)
     loss_fn = nn.MSELoss()
 
+    instructions = ["将2水平翻转", "将4垂直翻转", "将5放大1倍", "将7缩小2倍", "将9旋转30度", "将1旋转120度"]
+    inst_ids = tokenizer.encode_batch(instructions, return_tensor=True)
+
+    with torch.no_grad():
+        samples = engine.sample(
+            model,
+            shape=(len(instructions), cfg.video.num_frames, *cfg.video.frame_shape),
+            c=inst_ids,
+            scale=cfg.method.cfg_scale
+        )
+        samples = samples.detach().cpu()
+
     global_step = 0
     for epoch in range(1, cfg.method.epochs + 1):
         model.train()

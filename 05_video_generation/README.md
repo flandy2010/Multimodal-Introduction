@@ -20,14 +20,14 @@ pip install -r requirements.txt
 python video_generator.py
 ```
 生成的胶片序列图样例如下：
-- (上图) 对数字7进行水平翻转
-- (下图) 对数字5旋转60度
+- (上图) 将9水平翻转
+- (下图) 将9缩小2倍
 
 <p align="center">
-  <img src="./examples/数字7_垂直翻转_预览.png" width="300" title="对数字7进行水平翻转">
+  <img src="./examples/将9水平翻转_预览.png" width="300" title="对数字7进行水平翻转">
 </p>
 <p align="center">
-  <img src="./examples/数字5_旋转60度_预览.png" width="300" title="对数字5旋转60度">
+  <img src="./examples/将9缩小2倍_预览.png" width="300" title="对数字5旋转60度">
 </p>
 
 ### 模型训练
