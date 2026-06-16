@@ -31,6 +31,10 @@ python video_generator.py
 </p>
 
 ### 模型训练
+```shell
+# 使用FlowMatching + DiT
+python main.py --mode train --method flow_matching --n_steps 1000 --sample_steps 20 --model dit --lr 0.0002 --batch 128 --device mps
+```
 
 ### 模型推理
 

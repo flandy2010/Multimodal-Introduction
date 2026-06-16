@@ -17,8 +17,9 @@ except ImportError:
 class CharTokenizer:
     def __init__(self):
         # 基础词表：数字 + 中文关键字 + 符号
-        self.chars = list("0123456789放大缩小旋转倍度水平垂直翻")
-        self.chars = self.chars + ["<PAD>"]
+        self.chars = ["<PAD>"]
+        for char in "将0123456789放大缩小旋转倍度水平垂直翻":
+            self.chars.append(char)
         self.char_to_id = {c: i for i, c in enumerate(self.chars)}
         self.id_to_char = {i: c for c, i in self.char_to_id.items()}
         self.vocab_size = len(self.chars)
@@ -35,6 +36,12 @@ class CharTokenizer:
         if isinstance(ids, torch.Tensor):
             ids = ids.tolist()
         return "".join([self.id_to_char.get(i, "") for i in ids if i != self.pad_id])
+
+    def encode_batch(self, texts, max_len=10, return_tensor=True):
+        token_ids = [self.encode(text, max_len) for text in texts]
+        if return_tensor:
+            token_ids = torch.LongTensor(token_ids)
+        return token_ids
 
 class MNISTVideoDataset(Dataset):
 
@@ -71,6 +78,7 @@ class MNISTVideoDataset(Dataset):
         video_tensor = self.engine.transform_to_tensor(img, inst_text, num_frames=self.num_frames)
 
         # 3. 指令转 ID
+        inst_text = f"将{label}{inst_text}"
         inst_ids = torch.LongTensor(self.tokenizer.encode(inst_text))
 
         return {
@@ -88,7 +96,12 @@ def get_video_dataloader(cfg):
     ])
 
     # 建议此处路径由 cfg 提供
-    mnist_base = datasets.MNIST(root=cfg.data.root, train=(cfg.common.mode == "train"), download=True, transform=transform)
+    mnist_base = datasets.MNIST(
+        root=cfg.data.root,
+        train=(cfg.common.mode == "train"),
+        download=True,
+        transform=transform
+    )
 
     video_ds = MNISTVideoDataset(
         mnist_base,
@@ -135,7 +148,7 @@ if __name__ == "__main__":
 
         engine = VideoTransformEngine()
         save_path = engine.save_to_grid_image(videos[0], labels[0].item(), texts[0])
-        print(f"save result of \'{texts[0]}({labels[0]})\' to: {save_path}")
+        print(f"save result of \'{texts[0]}\' to: {save_path}")
 
     except Exception as e:
         print(f"❌ 单测失败: {e}")

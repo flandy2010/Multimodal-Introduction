@@ -77,10 +77,10 @@ class VideoTransformEngine:
             frames.append(frame)
         return torch.stack(frames)
 
-    def save_to_mp4(self, video_tensor, label, inst_text, save_dir="./examples"):
+    def save_to_mp4(self, video_tensor, inst_text, save_dir="./examples"):
         """保存为 mp4 视频"""
         if not os.path.exists(save_dir): os.makedirs(save_dir)
-        save_path = os.path.join(save_dir, f"数字{label}_{inst_text}.mp4")
+        save_path = os.path.join(save_dir, f"{inst_text}.mp4")
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         video_writer = cv2.VideoWriter(save_path, fourcc, self.fps, self.output_size)
 
@@ -97,7 +97,8 @@ class VideoTransformEngine:
         video_writer.release()
         return save_path
 
-    def save_to_grid_image(self, video_tensor, label, inst_text, save_dir="./examples", cell_size=(64, 64)):
+    @staticmethod
+    def save_to_grid_image(video_tensor, inst_text, save_dir="./examples", cell_size=(64, 64)):
         """
         核心新增：将视频帧拼成 10 帧一行的网格大图
         cell_size: 每一帧在网格中的预览大小
@@ -126,7 +127,7 @@ class VideoTransformEngine:
 
         # 3. 在图片顶部或底部写上信息
         # 如果需要可以在画布预留空间写字，这里直接保存
-        save_path = os.path.join(save_dir, f"数字{label}_{inst_text}_预览.png")
+        save_path = os.path.join(save_dir, f"{inst_text}_预览.png")
         grid_img.save(save_path)
         print(f"Grid image saved to {save_path}")
         return save_path
@@ -187,4 +188,4 @@ if __name__ == '__main__':
     for instruction in ["放大3倍", "缩小2倍", "水平翻转", "垂直翻转", "旋转60度"]:
         video_tensor = engine.transform_to_tensor(image, instruction, num_frames=30)
         # engine.save_to_mp4(video_tensor, 5, instruction)
-        engine.save_to_grid_image(video_tensor, 5, instruction)
+        engine.save_to_grid_image(video_tensor, f"将5{instruction}")
