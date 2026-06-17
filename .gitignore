@@ -1,4 +1,5 @@
 .idea/
+.workbuddy/
 .DS_Store
 __pycache__/
 
