@@ -64,8 +64,8 @@ def train(model, engine, cfg, exp_dir):
         if epoch % 5 == 0:
             model.eval()
 
-            # instructions = ["将2水平翻转", "将4垂直翻转", "将5放大1倍", "将7缩小2倍", "将9旋转30度", "将1旋转120度"]
-            instructions = ["将2垂直翻转", "将4垂直翻转", "将5垂直翻转", "将7垂直翻转", "将9垂直翻转"]
+            instructions = ["将2水平翻转", "将4垂直翻转", "将5放大1倍", "将7缩小2倍", "将9旋转30度", "将1旋转120度"]
+            # instructions = ["将2垂直翻转", "将4垂直翻转", "将5垂直翻转", "将7垂直翻转", "将9垂直翻转"]
             inst_ids = tokenizer.encode_batch(instructions, return_tensor=True)
 
             with torch.no_grad():
@@ -101,8 +101,8 @@ def sample(model, engine, cfg, exp_dir):
     tokenizer = CharTokenizer()
     video_engine = VideoTransformEngine(cfg)
 
-    # instructions = ["将2水平翻转", "将4垂直翻转", "将5放大1倍", "将7缩小2倍", "将9旋转30度", "将1旋转120度"]
-    instructions = ["将2垂直翻转", "将4垂直翻转", "将5垂直翻转", "将7垂直翻转", "将9垂直翻转"]
+    instructions = ["将2水平翻转", "将4垂直翻转", "将5放大1倍", "将7缩小2倍", "将9旋转30度", "将1旋转120度"]
+    # instructions = ["将2垂直翻转", "将4垂直翻转", "将5垂直翻转", "将7垂直翻转", "将9垂直翻转"]
     inst_ids = tokenizer.encode_batch(instructions, return_tensor=True)
 
     with torch.no_grad():

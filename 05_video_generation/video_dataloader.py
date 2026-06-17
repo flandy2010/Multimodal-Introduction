@@ -51,8 +51,8 @@ class MNISTVideoDataset(Dataset):
         self.tokenizer = tokenizer or CharTokenizer()
         # 内部实例化转换引擎
         self.engine = VideoTransformEngine()
-        # self.inst_templates = ["放大", "缩小", "旋转", "水平翻转", "垂直翻转"]
-        self.inst_templates = ["垂直翻转"]
+        self.inst_templates = ["放大", "缩小", "旋转", "水平翻转", "垂直翻转"]
+        # self.inst_templates = ["垂直翻转"]
 
     def __len__(self):
         return len(self.base_ds)
