@@ -129,7 +129,7 @@ if __name__ == "__main__":
         common=SimpleNamespace(mode="train", num_workers=0),
         data=SimpleNamespace(root="../data"),
         method=SimpleNamespace(batch_size=10),
-        video=SimpleNamespace(num_frames=16)
+        video=SimpleNamespace(num_frames=2)
     )
 
     try:

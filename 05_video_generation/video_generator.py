@@ -33,7 +33,7 @@ class VideoTransformEngine:
             frame = image.clone()
 
             if inst_type == "旋转":
-                frame = TF.rotate(frame, val * progress)
+                frame = TF.rotate(frame, val * progress, fill=-1.0)
             elif inst_type == "放大":
                 scale = 1.0 + (val - 1.0) * progress
                 frame = self._center_scale(frame, scale)
