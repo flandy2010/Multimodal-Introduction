@@ -93,6 +93,49 @@ class VideoTransformEngine:
         video_writer.release()
         return save_path
 
+    def save_to_gif(self, video_tensor, inst_text, save_dir="./examples"):
+        """将视频张量保存为 GIF 动图"""
+        if not os.path.exists(save_dir):
+            os.makedirs(save_dir)
+
+        save_path = os.path.join(save_dir, f"{inst_text}.gif")
+
+        frames_pil = []
+        for i in range(len(video_tensor)):
+            # 1. 反归一化并转为 PIL 图像
+            img_normalized = self._denormalize(video_tensor[i])
+            img_pil = TF.to_pil_image(img_normalized).convert("RGB")
+
+            # 2. 调整尺寸
+            img_pil = img_pil.resize(self.output_size, Image.LANCZOS)
+
+            # 3. 叠加指令文字 (与 MP4 逻辑一致)
+            draw = ImageDraw.Draw(img_pil)
+            draw.text((10, self.output_size[1] - 30), f"指令: {inst_text}", font=self.font, fill=(255, 255, 255))
+
+            frames_pil.append(img_pil)
+
+        # 4. 计算每帧时长 (GIF duration 以毫秒为单位)
+        # 例如 24fps 对应 duration 约为 41.6ms
+        frame_duration = int(1000 / self.fps)
+
+        # 5. 保存 GIF
+        # save_all=True: 保存序列帧
+        # append_images: 后续帧列表
+        # duration: 每帧停留时间
+        # loop=0: 无限循环播放
+        frames_pil[0].save(
+            save_path,
+            save_all=True,
+            append_images=frames_pil[1:],
+            duration=frame_duration,
+            loop=0,
+            optimize=True
+        )
+
+        print(f"GIF 已保存至: {save_path}")
+        return save_path
+
     def save_to_grid_image(self, video_tensor, inst_text, save_dir="./examples", cell_size=(64, 64)):
         if not os.path.exists(save_dir): os.makedirs(save_dir)
         num_frames = video_tensor.shape[0]
@@ -169,4 +212,4 @@ if __name__ == '__main__':
 
     for instruction in ["放大3倍", "缩小2倍", "水平翻转", "垂直翻转", "旋转60度"]:
         video_tensor = engine.transform_to_tensor(image, instruction, num_frames=30)
-        engine.save_to_grid_image(video_tensor, f"将5{instruction}", cell_size=(28, 28))
+        engine.save_to_gif(video_tensor, f"将5{instruction}")
