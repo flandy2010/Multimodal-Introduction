@@ -22,6 +22,7 @@ def train(model, engine, cfg, exp_dir):
     writer = SummaryWriter(log_dir=exp_dir)
     dataloader = get_video_dataloader(cfg)
     tokenizer = CharTokenizer()
+    video_engine = VideoTransformEngine(cfg)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg.method.lr)
     loss_fn = nn.MSELoss()
@@ -63,7 +64,8 @@ def train(model, engine, cfg, exp_dir):
         if epoch % 5 == 0:
             model.eval()
 
-            instructions = ["将2水平翻转", "将4垂直翻转", "将5放大1倍", "将7缩小2倍", "将9旋转30度", "将1旋转120度"]
+            # instructions = ["将2水平翻转", "将4垂直翻转", "将5放大1倍", "将7缩小2倍", "将9旋转30度", "将1旋转120度"]
+            instructions = ["将2垂直翻转", "将4垂直翻转", "将5垂直翻转", "将7垂直翻转", "将9垂直翻转"]
             inst_ids = tokenizer.encode_batch(instructions, return_tensor=True)
 
             with torch.no_grad():
@@ -75,7 +77,7 @@ def train(model, engine, cfg, exp_dir):
                 )
                 samples = samples.detach().cpu()
                 for instruction, sample in zip(instructions, samples):
-                    VideoTransformEngine.save_to_grid_image(
+                    video_engine.save_to_grid_image(
                         video_tensor=sample,
                         inst_text=f"epoch_{epoch}_{instruction}",
                         save_dir=f"{exp_dir}/samples/",
@@ -97,8 +99,10 @@ def sample(model, engine, cfg, exp_dir):
     model = model.to(cfg.common.device)
 
     tokenizer = CharTokenizer()
+    video_engine = VideoTransformEngine(cfg)
 
-    instructions = ["将2水平翻转", "将4垂直翻转", "将5放大1倍", "将7缩小2倍", "将9旋转30度", "将1旋转120度"]
+    # instructions = ["将2水平翻转", "将4垂直翻转", "将5放大1倍", "将7缩小2倍", "将9旋转30度", "将1旋转120度"]
+    instructions = ["将2垂直翻转", "将4垂直翻转", "将5垂直翻转", "将7垂直翻转", "将9垂直翻转"]
     inst_ids = tokenizer.encode_batch(instructions, return_tensor=True)
 
     with torch.no_grad():
@@ -110,7 +114,7 @@ def sample(model, engine, cfg, exp_dir):
         )
         samples = samples.detach().cpu()
         for instruction, sample in zip(instructions, samples):
-            VideoTransformEngine.save_to_grid_image(
+            video_engine.save_to_grid_image(
                 video_tensor=sample,
                 inst_text=f"ret_{instruction}",
                 save_dir=f"{exp_dir}/result/",

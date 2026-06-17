@@ -51,7 +51,8 @@ class MNISTVideoDataset(Dataset):
         self.tokenizer = tokenizer or CharTokenizer()
         # 内部实例化转换引擎
         self.engine = VideoTransformEngine()
-        self.inst_templates = ["放大", "缩小", "旋转", "水平翻转", "垂直翻转"]
+        # self.inst_templates = ["放大", "缩小", "旋转", "水平翻转", "垂直翻转"]
+        self.inst_templates = ["垂直翻转"]
 
     def __len__(self):
         return len(self.base_ds)
@@ -92,7 +93,9 @@ def get_video_dataloader(cfg):
 
     transform = transforms.Compose([
         transforms.ToTensor(),
-        transforms.Normalize((0.5,), (0.5,))
+        # 0.1307 是均值，0.3081 是标准差
+        transforms.Normalize((0.1307,), (0.3081,))
+        # transforms.Normalize((0.5,), (0.5,))
     ])
 
     # 建议此处路径由 cfg 提供
