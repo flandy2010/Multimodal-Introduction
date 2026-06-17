@@ -86,7 +86,7 @@ class DiTBlock(nn.Module):
         )
 
     def forward(self, x, c):
-        # x: [B, T, D], c: [B, D] (已融合的条件向量)
+        # x: [B, T, D],  : [B, D] (已融合的条件向量)
         # 以下6个变量shape: [B, D]
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(6, dim=1)
 
