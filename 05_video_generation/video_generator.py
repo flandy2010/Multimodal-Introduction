@@ -7,12 +7,13 @@ import torch
 import torch.nn.functional as F
 import torchvision.transforms.functional as TF
 from PIL import Image, ImageDraw, ImageFont
+from config import get_config
 
 
 class VideoTransformEngine:
-    def __init__(self, output_size=(256, 256), fps=24):
-        self.output_size = output_size
-        self.fps = fps
+    def __init__(self, cfg):
+        self.output_size = cfg.video.gif_size
+        self.fps = cfg.video.fps
         # MNIST 统计量
         self.MEAN = 0.1307
         self.STD = 0.3081
@@ -206,7 +207,9 @@ def create_synthetic_five_n01():
 
 
 if __name__ == '__main__':
-    engine = VideoTransformEngine()
+
+    cfg = get_config()
+    engine = VideoTransformEngine(cfg)
     # 使用新生成的符合 N(0,1) 的图像
     image = create_synthetic_five_n01()
 

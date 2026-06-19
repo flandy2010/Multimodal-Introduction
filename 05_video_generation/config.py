@@ -33,6 +33,8 @@ def get_config():
     cfg.video = SimpleNamespace(
         num_frames=16,
         frame_shape=(1, 28, 28),
+        gif_size=(256, 256),
+        fps=12,
     )
 
     # --- 训练/采样算法配置 ---
