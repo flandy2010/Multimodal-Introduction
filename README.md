@@ -28,10 +28,16 @@
 - 训练效果：DiT + FlowMatching + sample_step=50
 ![result](04_diffusion_transformer/examples/dit_fm_step50.png)
 
-### [TODO] Video Generation
+### [2026-06-19] Video Generation
 基于Diffusion Transformer结构进行实验，带CFG但考虑到数据集分辨率较低暂时不使用VAE结构。使用工程化方案基于现有的图片进行视频生成：
-- 原始素材：MNIST手写数据集
-- 加工方式：图片缩放，图片翻转，图片旋转
-- 控制信息：通过模版方式生成如：“生成一张(数字1)(上下翻转)的视频片段”
+- 实现记录：[Nano-Flow-Matching-CFG](https://github.com/flandy2010/Multimodal-Introduction/blob/main/05_video_generation/README.md)
+  - 原始素材：MNIST手写数据集
+  - 加工方式：图片缩放，图片翻转，图片旋转
+  - 控制信息：通过模版方式生成如：“生成一张(数字1)(上下翻转)的视频片段”
+- 训练效果：DiT + FlowMatching + sample_step=100 + n_frames=16
+- 吐槽：本来想尝试时长3-5秒，分辨率28x28的视频生成。实际跑下来发现勉强能训的动16帧的生成
 
-尝试时常3-5秒，分辨率28x28的视频生成。
+![result](05_video_generation/examples/record_demo_02/ret_将0水平翻转.gif)
+![result](05_video_generation/examples/record_demo_02/ret_将1垂直翻转.gif)
+![result](05_video_generation/examples/record_demo_02/ret_将7缩小2倍.gif)
+![result](05_video_generation/examples/record_demo_02/ret_将4旋转120度.gif)
