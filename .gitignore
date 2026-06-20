@@ -12,3 +12,4 @@ data/MNIST/
 03_guided_flow_matching/ckpt/
 04_diffusion_transformer/runs/
 05_video_generation/runs/
+06_neural_radiance_fields/runs/
