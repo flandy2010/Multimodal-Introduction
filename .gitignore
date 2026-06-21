@@ -13,3 +13,4 @@ data/MNIST/
 04_diffusion_transformer/runs/
 05_video_generation/runs/
 06_neural_radiance_fields/runs/
+07_instant_neural_graphics_primitives/runs

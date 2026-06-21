@@ -43,4 +43,10 @@
 ![result](05_video_generation/examples/record_demo_02/ret_将4旋转120度.gif)
 
 ### [TODO] Neural Radiance Fields
-步入3D建模内容，先练习一下经典的神经辐射场（Neural Radiance Fields），
+步入3D建模内容，先练习一下经典的神经辐射场（Neural Radiance Fields）。
+- 实现记录：[Neural-Radiance-Fields](https://github.com/flandy2010/Multimodal-Introduction/blob/main/06_neural_radiance_fields/README.md)
+- 训练数据：tiny_nerf_data
+- 训练效果：
+
+### [TODO] Instant Neural Graphics Primitives
+NeRF的改进版本，将`(x, y, z)`对应的特征内容从使用神经网络记忆变成查哈希表。仅使用神经网络对于特征进行处理，生成颜色和密度。
