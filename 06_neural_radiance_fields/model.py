@@ -53,19 +53,24 @@ class NeRF(nn.Module):
 
     def forward(self, x, d):
         # 1. 位置编码
-        x_embed = self.pos_enc(x)
-        d_embed = self.dir_enc(d)
+        x_embed = self.pos_enc(x)  # [batch_size, 3] -> [batch_size, in_dim_pos]
+        d_embed = self.dir_enc(d)  # [batch_size, 3] -> [batch_size, in_dim_dir]
 
         # 2. 预测密度
         h = x_embed
         for i, l in enumerate(self.pts_linears):
             h = F.relu(l(h))
-            if i == 4: h = torch.cat([x_embed, h], dim=-1)
+            if i == 4:
+                h = torch.cat([x_embed, h], dim=-1)
 
+        # [batch_size, in_dim_pos] -> [batch_size, 1]
         sigma = self.alpha_linear(h)
+
+        # 对根据(x, y, z)计算的特征进行一次线性变换
         feature = self.feature_linear(h)
 
         # 3. 预测颜色 (结合视角)
+        # [batch_size, W + in_dim_dir] -> [batch_size, W // 2] -> [batch_size, 3]
         h = torch.cat([feature, d_embed], dim=-1)
         h = F.relu(self.views_linear(h))
         rgb = torch.sigmoid(self.rgb_linear(h))
