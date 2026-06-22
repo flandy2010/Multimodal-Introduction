@@ -48,5 +48,15 @@
 - 训练数据：tiny_nerf_data
 - 训练效果：
 
-### [TODO] Instant Neural Graphics Primitives
+### [2026-06-22] Instant Neural Graphics Primitives
 NeRF的改进版本，将`(x, y, z)`对应的特征内容从使用神经网络记忆变成查哈希表。仅使用神经网络对于特征进行处理，生成颜色和密度。
+- 实现记录：[Instant-NGP](https://github.com/flandy2010/Multimodal-Introduction/blob/main/07_instant_neural_graphics_primitives/README.md)
+- 训练数据：tiny_nerf_data
+- 训练效果：
+
+![result](07_instant_neural_graphics_primitives/examples/demo02_iter9500_rotation_1.gif)
+![result](07_instant_neural_graphics_primitives/examples/demo02_iter9500_comparison_4.png)
+
+
+### [TODO] 3D Gaussian Splatting
+主动生成版本，以粒子而非光线作为主体，让作为粒子的椭圆球体主动发光并投影到2D画布上，叠加后得到最终的颜色。
