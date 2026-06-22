@@ -29,7 +29,9 @@ python inference.py --data_path ../data/tiny_nerf_data.npz --exp_dir ./runs/01 -
 ```
 ![comparsion_4](examples/demo02_iter9500_comparison_4.png)
 
-![comparsion_4](examples/demo02_iter9500_rotation_1.gif)
+<p align="center">
+  <img src="examples/demo02_iter9500_rotation_1.gif" alt="result">
+</p>
 
 # 踩坑记录
 
