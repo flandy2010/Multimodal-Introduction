@@ -123,6 +123,52 @@ def visualize_dataset(dataset):
     plt.show()
 
 
+def print_camera_stats(dataset):
+    """
+    智能统计相机分布，并推荐 Instant-NGP 最佳归一化参数
+    """
+    # 提取所有相机中心 (N, 3)
+    centers = dataset.poses[:, :3, 3]
+
+    # 1. 基础空间范围
+    min_xyz = np.min(centers, axis=0)
+    max_xyz = np.max(centers, axis=0)
+
+    # 2. 距离统计
+    distances = np.linalg.norm(centers, axis=1)
+    avg_dist = np.mean(distances)
+
+    print("\n" + "=" * 50)
+    print("趋势分析: 相机位姿空间统计")
+    print("=" * 50)
+    print(f"相机分布范围 (X, Y, Z):")
+    print(f"  X: [{min_xyz[0]:.2f}, {max_xyz[0]:.2f}]")
+    print(f"  Y: [{min_xyz[1]:.2f}, {max_xyz[1]:.2f}]")
+    print(f"  Z: [{min_xyz[2]:.2f}, {max_xyz[2]:.2f}]")
+    print(f"相机到原点平均距离: {avg_dist:.4f}")
+    print("-" * 50)
+
+    # 3. 智能推荐方案
+    # 方案 A: 宽松方案 (Safe Box) - 确保所有采样路径都在 [0, 1] 内
+    safe_offset = avg_dist
+    safe_scale = avg_dist * 2
+
+    # 方案 B: 炼丹推荐 (Tight Box) - 假设物体半径为相机距离的 30%~40%
+    # 这是针对 Lego 这种中心化物体最有效的方案
+    tight_radius = avg_dist * 0.37  # 约 1.5 左右
+    tight_offset = tight_radius
+    tight_scale = tight_radius * 2
+
+    print("推荐 A: [安全方案] (如果你担心坐标越界报错)")
+    print(f"  代码: x = (x + {safe_offset:.2f}) / {safe_scale:.2f}")
+    print(f"  Near/Far 建议: near=0.0, far={safe_scale:.2f}")
+    print("\n推荐 B: [炼丹方案] (大幅提升画质，让哈希网格聚焦物体)")
+    print(f"  代码: x = (x + {tight_offset:.2f}) / {tight_scale:.2f}")
+    print(f"  Near/Far 建议: near={avg_dist - tight_radius:.1f}, far={avg_dist + tight_radius:.1f}")
+    print(f"  注意: 使用此方案必须配合 torch.clamp(x, 0, 1)")
+    print("=" * 50 + "\n")
+
+
 if __name__ == "__main__":
 
     try:
@@ -131,6 +177,9 @@ if __name__ == "__main__":
         print(f"训练样本数: {len(dataset)}")
         print(f"图片尺寸: {dataset.H}x{dataset.W}")
         print(f"焦距 (Focal): {dataset.focal}")
+
+        # 打印统计信息
+        print_camera_stats(dataset)
 
         # 调用可视化函数
         visualize_dataset(dataset)

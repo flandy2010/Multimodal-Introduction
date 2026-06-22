@@ -5,8 +5,12 @@ import numpy as np
 
 
 class HashEncoder(nn.Module):
-    def __init__(self, num_levels=16, level_dim=2, per_level_scale=1.5,
-                 base_resolution=16, log2_hashmap_size=19):
+    def __init__(self,
+                 num_levels=16,
+                 level_dim=2,
+                 per_level_scale=1.5,
+                 base_resolution=16,
+                 log2_hashmap_size=19):
         super().__init__()
         self.num_levels = num_levels
         self.level_dim = level_dim
@@ -36,6 +40,7 @@ class HashEncoder(nn.Module):
         return res % self.hashmap_size
 
     def forward(self, x):
+
         # --- 修改 3: 强制坐标 Clamp 在 [0, 1-eps] 之间，防止越界 ---
         x = torch.clamp(x, 0.0, 1.0 - 1e-4)
 
@@ -98,7 +103,7 @@ class InstantNGP(nn.Module):
             nn.Linear(64, 16)
         )
         # 初始化最后一个线性层，让 Sigma 初期接近一个微小的正数
-        nn.init.constant_(self.sigma_net[-1].bias, 0.1)
+        nn.init.constant_(self.sigma_net[-1].bias, 1.0)
 
         self.color_net = nn.Sequential(
             nn.Linear(15 + self.dir_dim, 64),
@@ -110,9 +115,12 @@ class InstantNGP(nn.Module):
         )
 
     def forward(self, x, d):
-        # --- 修改 5: 归一化逻辑微调，确保物体处于 [0, 1] 中心 ---
-        # TinyNeRF 数据通常在 [-1.5, 1.5] 之间，这里映射到 [0.125, 0.875]
-        x = (x + 2.0) / 4.0
+
+        # 根据实际数据集统计量进行修改
+        offset = 3.0
+        scale = 6.0
+        x = (x + offset) / scale
+        x = torch.clamp(x, 0.0, 1.0 - 1e-4)
 
         x_embed = self.hash_encoder(x)
         h = self.sigma_net(x_embed)
