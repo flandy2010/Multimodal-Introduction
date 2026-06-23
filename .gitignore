@@ -5,6 +5,7 @@ __pycache__/
 
 # data
 data/MNIST/
+data/360_extra_scenes
 
 # ckpt
 01_diffusion_model/ckpt/
