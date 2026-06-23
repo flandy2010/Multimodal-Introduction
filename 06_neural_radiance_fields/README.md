@@ -51,7 +51,7 @@ python train.py --data_path ../data/tiny_nerf_data.npz --exp_dir ./runs/h20_demo
 - 原因：
   - 部分原因是LR过高，同时也因为没有加任何的训练Trick（比如各类正则化）
   - 加了正则化又跑了一次还是不对，细看的话主要问题出在没有积木的颗粒感
-- 解决方案：
+- 解决方案：尝试各类正则化（对于像素的坐标抖动，对于光线采样点的随机抖动，对于sigma加随机noise）
 
 
 # 参考资料
