@@ -4,18 +4,15 @@ import torch.nn.functional as F
 
 def ssim_loss(pred, gt, window_size=11):
     """简化版 SSIM Loss（单尺度），输入 [H, W, 3] 格式"""
-    # 转为 [1, 3, H, W]
     pred_t = pred.permute(2, 0, 1).unsqueeze(0)
     gt_t = gt.permute(2, 0, 1).unsqueeze(0)
 
     C1 = 0.01 ** 2
     C2 = 0.03 ** 2
 
-    # 均值滤波
     pad = window_size // 2
     kernel = torch.ones(1, 1, window_size, window_size, device=pred.device) / (window_size ** 2)
 
-    # 按通道分别计算
     ssim_val = 0.0
     for c in range(3):
         p = pred_t[:, c:c+1]
@@ -41,16 +38,16 @@ def ssim_loss(pred, gt, window_size=11):
 
 
 class GaussianStrategy:
+    """
+    论文标准密度控制策略
+    """
     def __init__(self,
                  densify_from_iter=500,
                  densify_until_iter=15000,
-                 densification_interval=500,
+                 densification_interval=100,
                  opacity_reset_interval=3000,
-                 grad_threshold=0.0004,
-                 max_points=100000):
-        """
-        控制高斯密度和训练策略
-        """
+                 grad_threshold=0.0002,
+                 max_points=200000):
         self.densify_from_iter = densify_from_iter
         self.densify_until_iter = densify_until_iter
         self.densification_interval = densification_interval
@@ -59,42 +56,31 @@ class GaussianStrategy:
         self.max_points = max_points
 
     def step(self, step, model, optimizer):
-        """
-        在每个训练步调用，决定是否触发 Densification 或 Opacity Reset
-        """
-        # 密度控制
-        if (step > self.densify_from_iter and
+        """每步调用：密度控制 + 透明度重置"""
+
+        # 密度控制：每 100 步执行
+        if (step >= self.densify_from_iter and
                 step < self.densify_until_iter and
                 step % self.densification_interval == 0 and
                 model.num_points < self.max_points):
-            optimizer = model.densify_and_prune(optimizer, grad_threshold=self.grad_threshold)
+            max_scale = model.radius * 0.1  # 剔除场景级巨球
+            optimizer = model.densify_and_prune(
+                optimizer,
+                grad_threshold=self.grad_threshold,
+                min_opacity=0.005,
+                max_scale=max_scale,
+            )
+            print(f"📊 [Step {step}] Densify: {model.num_points} points")
 
-        # 透明度重置（论文核心 trick：清理膨胀的幽灵球）
+        # 透明度重置：每 3000 步
         if step > 0 and step % self.opacity_reset_interval == 0:
             model.reset_opacity()
-            print(f"🧹 [Step {step}] 透明度重置完成，清理光团")
+            print(f"🧹 [Step {step}] Opacity reset")
 
         return optimizer
 
     def get_loss(self, out_image, gt_image, model, step):
-        """
-        复合 Loss: MSE + SSIM + 稀疏性正则
-        SSIM 抗模糊，MSE 保证整体收敛，稀疏性正则防止点堆积
-        """
-        # L1 Loss（比 MSE 对异常值更鲁棒，不会过度惩罚小误差）
+        """论文标准 Loss: 0.8 * L1 + 0.2 * (1 - SSIM)"""
         loss_l1 = F.l1_loss(out_image, gt_image)
-
-        # SSIM Loss（鼓励结构性匹配，抵抗"均匀色块"捷径）
         loss_ssim = ssim_loss(out_image, gt_image)
-
-        # 混合比例：论文标准 0.8 L1 + 0.2 SSIM
-        loss = 0.8 * loss_l1 + 0.2 * loss_ssim
-
-        # 稀疏性惩罚：鼓励透明度向两极分化（要么全透明要么全不透明）
-        if step > 500:
-            opacity = torch.sigmoid(model.gauss_params["opacities"])
-            # 熵正则：让 opacity 尽量接近 0 或 1
-            entropy = -(opacity * torch.log(opacity + 1e-8) + (1 - opacity) * torch.log(1 - opacity + 1e-8))
-            loss = loss + 1e-4 * entropy.mean()
-
-        return loss
+        return 0.8 * loss_l1 + 0.2 * loss_ssim
