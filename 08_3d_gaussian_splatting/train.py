@@ -70,7 +70,7 @@ def train(args):
         gt_image, w2c, K, camera_pos = gt_image.to(device), w2c.to(device), K.to(device), camera_pos.to(device)
 
         gaussians = model(camera_pos=camera_pos)
-        out_image = simple_rasterizer(gaussians, w2c, K, loader.H, loader.W)
+        out_image = simple_rasterizer(gaussians, w2c, K, loader.H, loader.W, tile_size=args.tile_size)
 
         # --- C. 损失与反向传播 ---
         loss = strategy.get_loss(out_image, gt_image, model, step)
@@ -122,6 +122,7 @@ def main():
     parser.add_argument("--n_iters", type=int, default=5000)
     parser.add_argument("--lr", type=float, default=1e-2)
     parser.add_argument("--sh_degree", type=int, default=3, help="SH 球谐阶数 (0=DC only, 3=full)")
+    parser.add_argument("--tile_size", type=int, default=64, help="渲染 tile 大小（越小越省显存）")
     parser.add_argument("--grad_threshold", type=float, default=0.0002, help="密度控制梯度阈值")
     parser.add_argument("--display_int", type=int, default=100)
     parser.add_argument("--device", type=str, default="auto")

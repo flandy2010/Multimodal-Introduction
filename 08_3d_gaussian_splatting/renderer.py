@@ -1,10 +1,11 @@
 import torch
 
 
-def simple_rasterizer(gaussians, w2c, K, H, W, camera_pos=None):
+def simple_rasterizer(gaussians, w2c, K, H, W, camera_pos=None, tile_size=64):
     """
-    向量化可微栅格化器（含视锥剔除 + 3σ截断优化 + SH 颜色）
-    camera_pos: [3] 相机世界坐标位置（用于 SH 颜色已在 model.forward 中处理）
+    分块（Tile-based）可微栅格化器
+    核心优化：将图像分为 tile_size x tile_size 的块，每块只处理影响该块的高斯点
+    显存复杂度从 O(N * H * W) 降为 O(N_tile * tile_size^2)
     """
     device = gaussians["means"].device
 
@@ -27,12 +28,12 @@ def simple_rasterizer(gaussians, w2c, K, H, W, camera_pos=None):
     opacities = gaussians["opacity"][mask]
     scales = gaussians["scales"][mask]
 
-    # 计算 2D 投影半径（用 3σ 作为有效覆盖范围）
+    # 计算 2D 投影半径
     focal_avg = (K[0, 0] + K[1, 1]) / 2.0
-    radii2D = (scales.mean(dim=-1, keepdim=True) * focal_avg) / depths[mask]
+    radii2D = (scales.mean(dim=-1, keepdim=True) * focal_avg) / depths[mask]  # [N_vis, 1]
 
-    # 视锥剔除：只保留投影点在画面扩展范围内的点
-    margin = radii2D.squeeze() * 3.0  # 3σ
+    # 视锥剔除：过滤完全不在画面内的点
+    margin = radii2D.squeeze() * 3.0
     in_frame = (
         (points_2d[:, 0] > -margin) & (points_2d[:, 0] < W + margin) &
         (points_2d[:, 1] > -margin) & (points_2d[:, 1] < H + margin)
@@ -47,47 +48,88 @@ def simple_rasterizer(gaussians, w2c, K, H, W, camera_pos=None):
     radii2D = radii2D[in_frame]
     depths_visible = depths[mask][in_frame]
 
-    # --- 排序与混合 (Front-to-Back) ---
-    indices = torch.argsort(depths_visible.squeeze(), descending=False)
+    # 按深度排序
+    sort_indices = torch.argsort(depths_visible.squeeze(), descending=False)
+    points_2d = points_2d[sort_indices]
+    colors = colors[sort_indices]
+    opacities = opacities[sort_indices]
+    radii2D = radii2D[sort_indices]
 
-    # 性能平衡点：渲染点数上限
-    # H20 (96GB) 可以上 50000+; MPS/低显存用 3000-10000
-    max_points = min(50000, len(indices))
-    render_idx = indices[:max_points]
+    # --- 分块渲染 ---
+    output = torch.zeros((H, W, 3), device=device)
+    n_tiles_h = (H + tile_size - 1) // tile_size
+    n_tiles_w = (W + tile_size - 1) // tile_size
 
-    means2D_sel = points_2d[render_idx]
-    colors_sel = colors[render_idx]
-    opacities_sel = opacities[render_idx]
-    radii2D_sel = radii2D[render_idx]
+    for ty in range(n_tiles_h):
+        for tx in range(n_tiles_w):
+            # 当前 tile 的像素范围
+            y_start = ty * tile_size
+            y_end = min(y_start + tile_size, H)
+            x_start = tx * tile_size
+            x_end = min(x_start + tile_size, W)
 
-    # 构造坐标网格
-    gy, gx = torch.meshgrid(torch.arange(H, device=device), torch.arange(W, device=device), indexing='ij')
-    pixel_coords = torch.stack([gx, gy], dim=-1).float() + 0.5
-    pixel_coords = pixel_coords.view(1, H * W, 2)
+            tile_h = y_end - y_start
+            tile_w = x_end - x_start
 
-    # 计算所有像素到高斯中心的平方距离
-    d2 = torch.sum((means2D_sel.unsqueeze(1) - pixel_coords) ** 2, dim=-1)
+            # 找出影响当前 tile 的高斯点（中心 ± 3σ 覆盖到 tile 范围）
+            r3 = radii2D.squeeze() * 3.0  # 3σ 范围
+            tile_mask = (
+                (points_2d[:, 0] + r3 > x_start) & (points_2d[:, 0] - r3 < x_end) &
+                (points_2d[:, 1] + r3 > y_start) & (points_2d[:, 1] - r3 < y_end)
+            )
 
-    # 3σ 截断：超过 3 倍半径的贡献直接置零，减少远距离点的影响（也是光晕的根因）
-    cutoff = (3.0 * radii2D_sel) ** 2
-    truncation_mask = d2 > cutoff  # [N, H*W]
+            if not tile_mask.any():
+                continue
 
-    # 计算高斯权重: exp(-d^2 / 2r^2)，用 where 避免 inplace 操作
-    raw_weight = torch.exp(-d2 / (2 * radii2D_sel ** 2 + 1e-5))
-    gaussian_weight = torch.where(truncation_mask, torch.zeros_like(raw_weight), raw_weight)
+            # 取出当前 tile 相关的点（已按深度排好序）
+            t_pts = points_2d[tile_mask]      # [M, 2]
+            t_colors = colors[tile_mask]      # [M, 3]
+            t_opac = opacities[tile_mask]     # [M, 1]
+            t_radii = radii2D[tile_mask]      # [M, 1]
 
-    alphas = (opacities_sel * gaussian_weight).unsqueeze(-1)  # [N, Pixels, 1]
-    alphas = alphas.clamp(max=0.99)  # 防止单点完全遮挡
+            # 限制单 tile 内点数，防止极端情况
+            max_per_tile = 4000
+            if len(t_pts) > max_per_tile:
+                t_pts = t_pts[:max_per_tile]
+                t_colors = t_colors[:max_per_tile]
+                t_opac = t_opac[:max_per_tile]
+                t_radii = t_radii[:max_per_tile]
 
-    # Alpha 合成 (Over Operator)
-    one_minus_alpha = 1.0 - alphas
-    transmittance = torch.cumprod(
-        torch.cat([torch.ones((1, H * W, 1), device=device), one_minus_alpha + 1e-6], dim=0),
-        dim=0
-    )[:-1]
+            # 构造 tile 内的像素坐标网格
+            gy, gx = torch.meshgrid(
+                torch.arange(y_start, y_end, device=device, dtype=torch.float32),
+                torch.arange(x_start, x_end, device=device, dtype=torch.float32),
+                indexing='ij'
+            )
+            tile_coords = torch.stack([gx, gy], dim=-1).reshape(1, -1, 2) + 0.5  # [1, tile_h*tile_w, 2]
+            n_pixels = tile_h * tile_w
 
-    # 最终颜色 = sum (T_i * alpha_i * color_i)
-    weights = alphas * transmittance
-    pixel_colors = torch.sum(weights * colors_sel.unsqueeze(1), dim=0)
+            # 计算距离平方 [M, n_pixels]
+            d2 = torch.sum((t_pts.unsqueeze(1) - tile_coords) ** 2, dim=-1)
 
-    return pixel_colors.view(H, W, 3)
+            # 3σ 截断
+            cutoff = (3.0 * t_radii) ** 2  # [M, 1]
+            valid = d2 <= cutoff
+
+            # 高斯权重
+            gaussian_weight = torch.exp(-d2 / (2 * t_radii ** 2 + 1e-5))
+            gaussian_weight = gaussian_weight * valid.float()
+
+            # Alpha
+            alphas = (t_opac * gaussian_weight).unsqueeze(-1)  # [M, n_pixels, 1]
+            alphas = alphas.clamp(max=0.99)
+
+            # Alpha 合成 (Front-to-Back)
+            one_minus_alpha = 1.0 - alphas
+            transmittance = torch.cumprod(
+                torch.cat([torch.ones((1, n_pixels, 1), device=device), one_minus_alpha + 1e-6], dim=0),
+                dim=0
+            )[:-1]
+
+            weights = alphas * transmittance  # [M, n_pixels, 1]
+            tile_colors = torch.sum(weights * t_colors.unsqueeze(1), dim=0)  # [n_pixels, 3]
+
+            # 写回输出
+            output[y_start:y_end, x_start:x_end] = tile_colors.view(tile_h, tile_w, 3)
+
+    return output
