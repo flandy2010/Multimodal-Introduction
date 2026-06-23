@@ -42,9 +42,17 @@ python train.py --data_path ../data/tiny_nerf_data.npz --exp_dir ./runs/h20_demo
 ![iter_2000](examples/record_demo_01/iter2000_testpsnr23.39.png)
 ![iter_3000](examples/record_demo_01/iter3000_testpsnr24.61.png)
 
-### 推理结果
+在H20环境iter=10000的情况下，PSNR可以达到26，但积木的颗粒感没有完全展现：
+![iter_10000](examples/record_demo_02.png)
 
 # 踩坑记录
+
+### 输出图像缺失细节
+- 现象：模型在iter=10000的情况下，误差热力图显示边缘仍然存在较多的亮点
+- 原因：“连续的神经网络”难以拟合“离散的马赛克边缘”
+- 解决方案：尝试扩大模型参数规模，缩小采样范围，加入分层采样
+
+![iter_10000](examples/record_demo_02.png)
 
 ### 模型难以突破PSNR=26
 - 现象：模型在iter=1400的时候PSNR达到了24，直到但iter=4000一直在24-25.9之间横跳
