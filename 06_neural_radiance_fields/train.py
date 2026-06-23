@@ -76,6 +76,7 @@ def render_rays(model, rays_o, rays_d, near, far, n_samples, rand=False):
 
 @torch.no_grad()
 def evaluate(args, model, test_dataset, device, i, axes):
+
     model.eval()
     target_img, target_pose = test_dataset[0]
     target_img, target_pose = target_img.to(device), target_pose.to(device)
@@ -88,7 +89,24 @@ def evaluate(args, model, test_dataset, device, i, axes):
     mse = F.mse_loss(rgb_pred, target_img)
     psnr = -10. * torch.log10(mse)
 
-    # ... (绘图保存逻辑保持不变) ...
+    ax1, ax2 = axes
+    ax1.clear()
+    ax1.imshow(target_img.cpu().numpy())
+    ax1.set_title("Test GT")
+    ax1.axis('off')
+
+    ax2.clear()
+    ax2.imshow(rgb_pred.detach().cpu().numpy())
+    ax2.set_title(f"Iter {i} Test PSNR: {psnr:.2f}")
+    ax2.axis('off')
+
+    # 保存图片
+    save_path = os.path.join(args.exp_dir, f"iter{i}_testpsnr{psnr:.2f}.png")
+    plt.savefig(save_path, bbox_inches='tight')
+    # plt.pause(0.01)
+
+    model.train()  # 切换回训练模式
+
     return psnr.item()
 
 
