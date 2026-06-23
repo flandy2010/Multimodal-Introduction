@@ -45,7 +45,11 @@ python train.py --data_path ../data/tiny_nerf_data.npz --exp_dir ./runs/h20_demo
 ### 推理结果
 
 # 踩坑记录
-除了MPS上训练的慢一点其他都挺好的。
+
+### 模型难以突破PSNR=26
+- 现象：模型在iter=1400的时候PSNR达到了24，直到但iter=4000一直在24-25.9之间横跳
+- 原因：部分原因是LR过高，同时也因为没有加任何的训练Trick（比如各类正则化）
+- 解决方案：
 
 
 # 参考资料
