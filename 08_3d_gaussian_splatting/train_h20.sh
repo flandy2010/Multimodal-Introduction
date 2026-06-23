@@ -12,7 +12,7 @@ export CUDA_VISIBLE_DEVICES=0
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 DATA_PATH="../data/360_extra_scenes/flowers"
-EXP_DIR="./runs/h20_flowers_v2"
+EXP_DIR="./runs/h20_flowers"
 
 python train.py \
     --data_path $DATA_PATH \
