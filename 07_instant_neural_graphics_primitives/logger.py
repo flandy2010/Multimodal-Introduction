@@ -2,6 +2,9 @@ import os
 import json
 import torch
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 from skimage.metrics import structural_similarity as ssim_func
 import datetime
 
@@ -9,7 +12,8 @@ import datetime
 class NeRFLogger:
     def __init__(self, exp_dir, args):
         self.exp_dir = exp_dir
-        os.makedirs(exp_dir, exist_ok=True)
+        self.vis_dir = os.path.join(exp_dir, "visuals")
+        os.makedirs(self.vis_dir, exist_ok=True)
 
         # 记录超参数
         self.config = vars(args)
@@ -55,7 +59,8 @@ class NeRFLogger:
             "ssim": ssim_val,
             "mse": mse,
             "max_error": max_error,
-            "mean_error": mean_error
+            "mean_error": mean_error,
+            "error_map": np.abs(pred_np - gt_np).mean(axis=-1),
         }
 
     def log_evaluation(self, iter_idx, metrics, lr):
@@ -86,3 +91,36 @@ class NeRFLogger:
         else:
             print("✨ 状态: 正常收敛中。")
         print("-" * 40)
+
+    def save_visualization(self, iter_idx, pred, gt, metrics):
+        """保存三联对比图：GT | Rendered | Error Heatmap"""
+        pred_np = pred.detach().cpu().numpy().clip(0, 1)
+        gt_np = gt.detach().cpu().numpy().clip(0, 1)
+        error_map = metrics["error_map"]
+
+        fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+        axes[0].imshow(gt_np)
+        axes[0].set_title("Ground Truth")
+        axes[0].axis('off')
+
+        axes[1].imshow(pred_np)
+        axes[1].set_title(f"Rendered (PSNR: {metrics['psnr']:.2f})")
+        axes[1].axis('off')
+
+        im = axes[2].imshow(error_map, cmap='jet', vmin=0, vmax=max(0.1, error_map.max()))
+        axes[2].set_title(f"Error (mean: {metrics['mean_error']:.4f})")
+        axes[2].axis('off')
+        plt.colorbar(im, ax=axes[2], fraction=0.046, pad=0.04)
+
+        save_path = os.path.join(self.vis_dir, f"iter_{iter_idx:05d}.png")
+        plt.savefig(save_path, bbox_inches='tight', dpi=100)
+        plt.close(fig)
+        return save_path
+
+    def evaluate_and_log(self, iter_idx, pred, gt, lr):
+        """一站式：计算指标 + 写日志 + 打印分析 + 保存可视化"""
+        metrics = self.calculate_image_metrics(pred, gt)
+        self.log_evaluation(iter_idx, metrics, lr)
+        self.print_analysis(iter_idx, metrics, lr)
+        self.save_visualization(iter_idx, pred, gt, metrics)
+        return metrics['psnr']
