@@ -70,7 +70,7 @@ def simple_rasterizer(gaussians, w2c, K, H, W, camera_pos=None, tile_size=128):
     depths = means_cam[:, 2:3]
 
     # 2. Near clipping
-    mask = depths.squeeze() > 0.1
+    mask = depths.squeeze(-1) > 0.1
     if not mask.any():
         return torch.zeros((H, W, 3), device=device) + means3D.sum() * 0
 
@@ -87,9 +87,11 @@ def simple_rasterizer(gaussians, w2c, K, H, W, camera_pos=None, tile_size=128):
     cov_inv = cov2D_inv[mask]
 
     # 4. 等效半径估算（椭圆最大半轴的 3σ）
-    a_inv = cov_inv[:, 0, 0]
-    d_inv = cov_inv[:, 1, 1]
-    max_radius = 3.0 * torch.max(1.0 / (a_inv.sqrt() + 1e-4), 1.0 / (d_inv.sqrt() + 1e-4))
+    a_inv = cov_inv[:, 0, 0]  # [N_vis]
+    d_inv = cov_inv[:, 1, 1]  # [N_vis]
+    r_a = 1.0 / (a_inv.sqrt() + 1e-4)
+    r_d = 1.0 / (d_inv.sqrt() + 1e-4)
+    max_radius = 3.0 * torch.maximum(r_a, r_d)  # element-wise max，不会对标量出错
 
     # 5. 视锥剔除：只保留覆盖范围与画面有交集的点
     in_frame = (
@@ -107,7 +109,7 @@ def simple_rasterizer(gaussians, w2c, K, H, W, camera_pos=None, tile_size=128):
     depths_vis = depths[mask][in_frame]
 
     # 6. 按深度排序（全局排一次）
-    sort_idx = torch.argsort(depths_vis.squeeze(), descending=False)
+    sort_idx = torch.argsort(depths_vis.squeeze(-1), descending=False)
     points_2d = points_2d[sort_idx]
     colors = colors[sort_idx]
     opacities = opacities[sort_idx]
@@ -150,7 +152,7 @@ def simple_rasterizer(gaussians, w2c, K, H, W, camera_pos=None, tile_size=128):
 
     # 8. 分块渲染（使用预计算的索引）
     output = torch.zeros((H, W, 3), device=device)
-    max_per_tile = 4000
+    max_per_tile = 2000
 
     for ty in range(n_tiles_h):
         for tx in range(n_tiles_w):
@@ -167,11 +169,12 @@ def simple_rasterizer(gaussians, w2c, K, H, W, camera_pos=None, tile_size=128):
             n_pixels = tile_h * tile_w
 
             # 取出该 tile 的点（已按深度排好序）
+            # 用列表索引而非单个值索引，保证结果始终是 2D+
             idx_t = torch.tensor(pt_indices[:max_per_tile], device=device, dtype=torch.long)
-            t_pts = points_2d[idx_t]
-            t_colors = colors[idx_t]
-            t_opac = opacities[idx_t]
-            t_cov_inv = cov_inv[idx_t]
+            t_pts = points_2d.index_select(0, idx_t)     # [M, 2]
+            t_colors = colors.index_select(0, idx_t)     # [M, 3]
+            t_opac = opacities.index_select(0, idx_t)    # [M, 1]
+            t_cov_inv = cov_inv.index_select(0, idx_t)   # [M, 2, 2]
             M = len(idx_t)
 
             # 像素坐标

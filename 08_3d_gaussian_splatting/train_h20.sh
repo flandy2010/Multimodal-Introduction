@@ -1,20 +1,19 @@
 #!/bin/bash
 # ============================================================
-# 3DGS H20 训练（性能优化版）
+# 3DGS H20 训练
 #
-# 优化点：
-#   1. tile_size=256（减少 tile 循环次数，H20 显存足够）
-#   2. grad_threshold=0.0005（控制点数增长，防止变慢）
-#   3. max_points=80000（硬上限）
-#   4. factor=4（高分辨率 1256x828）
-#   5. renderer 内使用展开公式计算高斯，避免矩阵乘法
+# 显存安全配置：
+#   tile_size=64 → 单 tile 峰值 2000×4096×4B ≈ 32MB
+#   factor=4 (1256x828) → ~320 tiles/帧
+#   max_per_tile=2000（renderer 内硬编码）
+#   如果仍 OOM，改 factor=8 (628x414) → ~70 tiles/帧
 # ============================================================
 
 export CUDA_VISIBLE_DEVICES=0
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 DATA_PATH="../data/360_extra_scenes/flowers"
-EXP_DIR="./runs/h20_v3"
+EXP_DIR="./runs/h20_v4"
 
 python train.py \
     --data_path $DATA_PATH \
@@ -23,9 +22,9 @@ python train.py \
     --num_points 50000 \
     --n_iters 30000 \
     --sh_degree 3 \
-    --tile_size 256 \
+    --tile_size 64 \
     --grad_threshold 0.0005 \
-    --display_int 500 \
+    --display_int 250 \
     --device cuda
 
 echo "Done! Results: $EXP_DIR"
