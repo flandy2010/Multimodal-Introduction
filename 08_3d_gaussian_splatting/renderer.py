@@ -1,9 +1,10 @@
 import torch
 
 
-def simple_rasterizer(gaussians, w2c, K, H, W):
+def simple_rasterizer(gaussians, w2c, K, H, W, camera_pos=None):
     """
-    向量化可微栅格化器（含视锥剔除 + 3σ截断优化）
+    向量化可微栅格化器（含视锥剔除 + 3σ截断优化 + SH 颜色）
+    camera_pos: [3] 相机世界坐标位置（用于 SH 颜色已在 model.forward 中处理）
     """
     device = gaussians["means"].device
 
@@ -50,7 +51,8 @@ def simple_rasterizer(gaussians, w2c, K, H, W):
     indices = torch.argsort(depths_visible.squeeze(), descending=False)
 
     # 性能平衡点：渲染点数上限
-    max_points = min(10000, len(indices))
+    # H20 (96GB) 可以上 50000+; MPS/低显存用 3000-10000
+    max_points = min(50000, len(indices))
     render_idx = indices[:max_points]
 
     means2D_sel = points_2d[render_idx]

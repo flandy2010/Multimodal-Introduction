@@ -127,9 +127,10 @@ class GSDataLoader:
 
     def get_view_params(self, index):
         image = self.images[index]
-        c2w = torch.eye(4);
+        c2w = torch.eye(4)
         c2w[:3, :4] = self.poses[index]
-        return image, torch.inverse(c2w), self.K
+        camera_pos = c2w[:3, 3]  # 相机在世界坐标系的位置
+        return image, torch.inverse(c2w), self.K, camera_pos
 
     def get_initial_pcd(self):
         return self.initial_points, self.initial_colors

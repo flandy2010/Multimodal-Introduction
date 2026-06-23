@@ -19,10 +19,9 @@ wget https://storage.googleapis.com/gresearch/refraw360/360_extra_scenes.zip
 ```
 
 ### 模型训练
-使用mps进行训练:
-- n_samples=64，iter=3000的时间消耗大概是20分钟
+使用H20进行进行训练，
 ```shell
-python train.py --exp_dir ./runs/gs_lego --num_points 5000 --n_iters 3000 --device mps
+
 ```
 
 ### 模型推理

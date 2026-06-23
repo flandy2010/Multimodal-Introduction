@@ -36,10 +36,10 @@ def train(args):
     logger.log_dataset_stats(loader)
 
     # 4. 模型初始化
-    # 传入场景半径 radius 和 初始点云 pcd
     model = GaussianModel(
-        num_points=args.num_points,  # 如果 pcd 不为空，model 内部会优先使用 pcd 数量
+        num_points=args.num_points,
         radius=scene_radius,
+        sh_degree=args.sh_degree,
         pcd=initial_pcd
     ).to(device)
 
@@ -66,11 +66,10 @@ def train(args):
 
         # --- B. 渲染 ---
         idx = np.random.randint(len(loader.images))
-        gt_image, w2c, K = loader.get_view_params(idx)
-        gt_image, w2c, K = gt_image.to(device), w2c.to(device), K.to(device)
+        gt_image, w2c, K, camera_pos = loader.get_view_params(idx)
+        gt_image, w2c, K, camera_pos = gt_image.to(device), w2c.to(device), K.to(device), camera_pos.to(device)
 
-        gaussians = model()
-        # 渲染器逻辑保持不变
+        gaussians = model(camera_pos=camera_pos)
         out_image = simple_rasterizer(gaussians, w2c, K, loader.H, loader.W)
 
         # --- C. 损失与反向传播 ---
@@ -118,12 +117,13 @@ def main():
     parser.add_argument("--data_path", type=str, default="../data/360_extra_scenes/flowers")
     parser.add_argument("--exp_dir", type=str, default="./gs_runs/final_dance")
 
-    parser.add_argument("--factor", type=int, default=16, help="图像下采样倍率，16=快速迭代，8=高精度")
-    parser.add_argument("--num_points", type=int, default=1500, help="初始精兵简政，靠分裂增长")
+    parser.add_argument("--factor", type=int, default=16, help="图像下采样倍率，16=快速迭代，4=高精度")
+    parser.add_argument("--num_points", type=int, default=15000, help="初始点数上限")
     parser.add_argument("--n_iters", type=int, default=5000)
     parser.add_argument("--lr", type=float, default=1e-2)
-    parser.add_argument("--grad_threshold", type=float, default=0.0001, help="更激进的分裂阈值")
-    parser.add_argument("--display_int", type=int, default=10)
+    parser.add_argument("--sh_degree", type=int, default=3, help="SH 球谐阶数 (0=DC only, 3=full)")
+    parser.add_argument("--grad_threshold", type=float, default=0.0002, help="密度控制梯度阈值")
+    parser.add_argument("--display_int", type=int, default=100)
     parser.add_argument("--device", type=str, default="auto")
 
     args = parser.parse_args()

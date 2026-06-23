@@ -5,6 +5,7 @@ import json
 import matplotlib.pyplot as plt
 from skimage.metrics import structural_similarity as ssim_func
 import datetime
+from model import SH_C0
 
 
 class GSLogger:
@@ -59,7 +60,8 @@ class GSLogger:
         if self._initial_means is None:
             self._initial_means = model.means.detach().clone()
             self._initial_scales = torch.exp(model.scales.detach()).clone()
-            self._initial_colors = torch.sigmoid(model.colors.detach()).clone()
+            # SH 模型：用 DC 分量计算初始颜色
+            self._initial_colors = (SH_C0 * model.sh_coeffs[:, 0].detach() + 0.5).clamp(0, 1).clone()
 
     def log_model_params(self, model, step=0, tag="Training"):
         """监控高斯点的物理状态 → 写入 model_states.md"""
@@ -68,7 +70,7 @@ class GSLogger:
         means = model.means.detach()
         scales = torch.exp(model.scales.detach())
         opacity = torch.sigmoid(model.opacity.detach())
-        colors = torch.sigmoid(model.colors.detach())
+        colors = (SH_C0 * model.sh_coeffs[:, 0].detach() + 0.5).clamp(0, 1)
 
         # 椭球形状
         scale_ratio = scales.max(dim=-1)[0] / (scales.min(dim=-1)[0] + 1e-8)
@@ -209,7 +211,7 @@ class GSLogger:
         means = model.means.detach()
         scales = torch.exp(model.scales.detach())
         opacity = torch.sigmoid(model.opacity.detach())
-        colors = torch.sigmoid(model.colors.detach())
+        colors = (SH_C0 * model.sh_coeffs[:, 0].detach() + 0.5).clamp(0, 1)
 
         scale_mean = scales.mean().item()
         scale_max = scales.max().item()
