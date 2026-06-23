@@ -15,13 +15,33 @@ pip install -r requirements.txt
 - 复用NeRF的训练集，放在公共路径下的`tiny_nerf_data.npz`。但发现从零训练特别难。
 - 下载`360_extra_scenes`数据集，放在公共路径下，包含`flowers`和`treehill`两个场景。
 ```shell
+cd ../data && mkdir 360_extra_scenes
+cd 360_extra_scenes
 wget https://storage.googleapis.com/gresearch/refraw360/360_extra_scenes.zip
+unzip 360_extra_scenes.zip
 ```
 
 ### 模型训练
 使用H20进行进行训练，
 ```shell
+# bash脚本
+bash train_h20.sh
 
+# python命令
+DATA_PATH="../data/360_extra_scenes/flowers"
+EXP_DIR="./runs/h20_v4"
+
+python train.py \
+    --data_path $DATA_PATH \
+    --exp_dir $EXP_DIR \
+    --factor 4 \
+    --num_points 50000 \
+    --n_iters 30000 \
+    --sh_degree 3 \
+    --tile_size 64 \
+    --grad_threshold 0.0005 \
+    --display_int 250 \
+    --device cuda
 ```
 
 ### 模型推理
