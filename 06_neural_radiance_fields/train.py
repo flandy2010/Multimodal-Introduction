@@ -12,10 +12,16 @@ from dataloader import TinyNeRFDataset
 from logger import NeRFLogger
 
 
-def get_rays(H, W, focal, c2w):
+def get_rays(H, W, focal, c2w, use_random_offset=False):
 
     i, j = torch.meshgrid(torch.linspace(0, W - 1, W), torch.linspace(0, H - 1, H), indexing='ij')
     # i, j是一个[W, H]矩阵M，其中M[i, :] = i, M[:, j] = j
+
+    if use_random_offset:
+        # 给像素坐标 i, j 增加 [-0.5, 0.5] 的随机偏移
+        # 这一步能强迫模型学习像素内部的颜色变化，从而“挤出”积木的颗粒感
+        i = i + torch.rand_like(i) - 0.5
+        j = j + torch.rand_like(j) - 0.5
 
     i, j = i.t(), j.t()  # 这里转置了
     # dirs.shape = [H, W, 3]，看起来根据焦距挪到距离相机单位距离处的坐标体系，dirs[i][j]对应图中(i, j)位置像素点变化后的空间坐标
@@ -29,13 +35,13 @@ def get_rays(H, W, focal, c2w):
     return rays_o, rays_d
 
 
-def render_rays(model, rays_o, rays_d, near, far, n_samples, rand=False):
+def render_rays(model, rays_o, rays_d, near, far, n_samples, use_random_sample=False, use_density_noise=False):
 
     # near, far表示物体距离相机的距离范围
     t_vals = torch.linspace(near, far, n_samples).to(rays_o.device)
 
     # 添加采样点随机偏离
-    if rand:
+    if use_random_sample:
         mids = .5 * (t_vals[...,1:] + t_vals[...,:-1])
         upper = torch.cat([mids, t_vals[...,-1:]], -1)
         lower = torch.cat([t_vals[...,:1], mids], -1)
@@ -59,7 +65,7 @@ def render_rays(model, rays_o, rays_d, near, far, n_samples, rand=False):
 
     # 加入Density Noise正则化，用于消除“雾气”的散点
     raw_sigma = raw[..., 3]
-    if model.training:
+    if use_density_noise:
         # 注入标准差为 1.0 的高斯噪声
         noise = torch.randn_like(raw_sigma) * 1.0
         sigma = F.relu(raw_sigma + noise)
@@ -86,7 +92,7 @@ def evaluate(args, model, test_dataset, device, i, logger, current_lr):
     H, W, focal = test_dataset.H, test_dataset.W, test_dataset.focal
 
     rays_o, rays_d = get_rays(H, W, focal, target_pose)
-    rgb_pred = render_rays(model, rays_o, rays_d, near=args.near, far=args.far, n_samples=args.n_samples, rand=False)
+    rgb_pred = render_rays(model, rays_o, rays_d, near=args.near, far=args.far, n_samples=args.n_samples)
 
     # 使用 logger 完成所有评测、记录、可视化
     psnr = logger.evaluate_and_log(i, rgb_pred, target_img, current_lr)
@@ -122,12 +128,18 @@ def train(args, model, train_dataset, test_dataset, device):
 
         lr = update_lr(i)
 
-        rays_o, rays_d = get_rays(H, W, focal, target_pose)
+        rays_o, rays_d = get_rays(H, W, focal, target_pose, use_random_offset=True)
 
         # 训练时开启随机抖动采样 (rand=True)
-        rgb_pred = render_rays(model, rays_o, rays_d,
-                               near=args.near, far=args.far,
-                               n_samples=args.n_samples, rand=True)
+        rgb_pred = render_rays(model,
+                               rays_o,
+                               rays_d,
+                               near=args.near,
+                               far=args.far,
+                               n_samples=args.n_samples,
+                               use_random_sample=True,
+                               use_density_noise=(lr > float(1e-5))
+                               )
 
         loss = F.mse_loss(rgb_pred, target_img)
         optimizer.zero_grad()
