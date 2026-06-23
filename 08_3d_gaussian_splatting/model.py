@@ -90,7 +90,10 @@ class GaussianModel(nn.Module):
 
         self.gauss_params = nn.ParameterDict({
             "means": nn.Parameter(means),
-            "scales": nn.Parameter(torch.log(torch.ones(means.shape[0], 3) * 0.005)),
+            # 初始化时给三轴不同的随机扰动，打破球体对称性
+            "scales": nn.Parameter(torch.log(
+                torch.ones(means.shape[0], 3) * 0.003 + torch.rand(means.shape[0], 3) * 0.001
+            )),
             "rotations": nn.Parameter(torch.tile(torch.tensor([1.0, 0, 0, 0]), (means.shape[0], 1))),
             "opacities": nn.Parameter(torch.ones(means.shape[0], 1) * 0.0),
             "sh_coeffs": nn.Parameter(sh),  # [N, n_sh, 3]
@@ -160,11 +163,16 @@ class GaussianModel(nn.Module):
 
     @torch.no_grad()
     def apply_constraints(self):
-        # 限制缩放上限
-        self.gauss_params["scales"].clamp_(max=np.log(0.03))
+        # 限制缩放上限：factor=4 时 0.008 约为 2-3 像素半径，不会形成光团
+        self.gauss_params["scales"].clamp_(max=np.log(0.008))
         # 限制位置
         limit = self.radius * 2.0
         self.gauss_params["means"].clamp_(-limit, limit)
+
+    @torch.no_grad()
+    def reset_opacity(self):
+        """透明度重置：杀掉膨胀的幽灵球，让有用的点重新浮现（论文 trick）"""
+        self.gauss_params["opacities"].fill_(-4.0)  # sigmoid(-4) ≈ 0.018
 
     def get_optimizer_groups(self, lr):
         """
