@@ -26,11 +26,16 @@ python dataloader.py
 ![examlpe](./examples/lego_digger.png)
 
 ### 模型训练
-使用mps进行训练，n_samples=64，iter=3000的时间消耗大概是30分钟：
+- 使用mps进行训练，n_samples=64，iter=3000的时间消耗大概是30分钟
+- 使用h20进行训练，n_samples=128，iter=10000的时间消耗大概是80分钟
 ```shell
+# MPS训练命令
 python train.py --data_path ../data/tiny_nerf_data.npz --exp_dir ./runs --device mps
+
+# H20训练命令
+python train.py --data_path ../data/tiny_nerf_data.npz --exp_dir ./runs/h20_demo --device cuda --n_iters 10000 --n_samples 128
 ```
-训练过程中使用PSNR作为衡量指标，iter=3000的情况下，PSNR=24.61，属于整体轮廓、颜色、大体形状清晰，但距离优秀还有第一定距离：
+训练过程中使用PSNR作为衡量指标，MPS环境iter=3000的情况下，PSNR=24.61，属于整体轮廓、颜色、大体形状清晰，但距离优秀还有第一定距离：
 
 ![iter_0](examples/record_demo_01/iter0_testpsnr7.22.png)
 ![iter_400](examples/record_demo_01/iter400_testpsnr19.15.png)
@@ -39,9 +44,9 @@ python train.py --data_path ../data/tiny_nerf_data.npz --exp_dir ./runs --device
 
 ### 推理结果
 
-
 # 踩坑记录
-暂无
+除了MPS上训练的慢一点其他都挺好的。
+
 
 # 参考资料
 1. [NeRF: Neural Radiance Fields](https://github.com/bmild/nerf)

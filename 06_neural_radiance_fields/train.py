@@ -122,12 +122,10 @@ def train(args, model, train_dataset, test_dataset, device):
             param_group['lr'] = lr
 
         # 前向与优化
-        rays_o, rays_d = get_rays(H, 60, focal, target_pose)
+        rays_o, rays_d = get_rays(H, W, focal, target_pose)
         # rays_o.shape = [100, 100, 3]
         # rays_d.shape = [100, 100, 3]
         rgb_pred = render_rays(model, rays_o, rays_d, near=2.0, far=6.0, n_samples=args.n_samples)
-
-        raise
 
         loss = F.mse_loss(rgb_pred, target_img)
         optimizer.zero_grad()
