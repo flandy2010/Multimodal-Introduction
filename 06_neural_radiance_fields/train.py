@@ -1,12 +1,15 @@
 import torch
 import torch.nn.functional as F
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import argparse
 import os
 from tqdm import tqdm
 from model import NeRF
 from dataloader import TinyNeRFDataset
+from logger import NeRFLogger
 
 
 def get_rays(H, W, focal, c2w):
@@ -75,7 +78,7 @@ def render_rays(model, rays_o, rays_d, near, far, n_samples, rand=False):
 
 
 @torch.no_grad()
-def evaluate(args, model, test_dataset, device, i, axes):
+def evaluate(args, model, test_dataset, device, i, logger, current_lr):
 
     model.eval()
     target_img, target_pose = test_dataset[0]
@@ -83,31 +86,13 @@ def evaluate(args, model, test_dataset, device, i, axes):
     H, W, focal = test_dataset.H, test_dataset.W, test_dataset.focal
 
     rays_o, rays_d = get_rays(H, W, focal, target_pose)
-    # 使用 args 里的 near 和 far
     rgb_pred = render_rays(model, rays_o, rays_d, near=args.near, far=args.far, n_samples=args.n_samples, rand=False)
 
-    mse = F.mse_loss(rgb_pred, target_img)
-    psnr = -10. * torch.log10(mse)
+    # 使用 logger 完成所有评测、记录、可视化
+    psnr = logger.evaluate_and_log(i, rgb_pred, target_img, current_lr)
 
-    ax1, ax2 = axes
-    ax1.clear()
-    ax1.imshow(target_img.cpu().numpy())
-    ax1.set_title("Test GT")
-    ax1.axis('off')
-
-    ax2.clear()
-    ax2.imshow(rgb_pred.detach().cpu().numpy())
-    ax2.set_title(f"Iter {i} Test PSNR: {psnr:.2f}")
-    ax2.axis('off')
-
-    # 保存图片
-    save_path = os.path.join(args.exp_dir, f"iter{i}_testpsnr{psnr:.2f}.png")
-    plt.savefig(save_path, bbox_inches='tight')
-    # plt.pause(0.01)
-
-    model.train()  # 切换回训练模式
-
-    return psnr.item()
+    model.train()
+    return psnr
 
 
 def train(args, model, train_dataset, test_dataset, device):
@@ -115,8 +100,9 @@ def train(args, model, train_dataset, test_dataset, device):
     H, W, focal = train_dataset.H, train_dataset.W, train_dataset.focal
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
-    plt.ion()
-    fig, axes = plt.subplots(1, 2, figsize=(10, 5))
+    # 初始化 Logger
+    logger = NeRFLogger(args.exp_dir, args)
+
     pbar = tqdm(range(args.n_iters), desc="Training")
 
     # --- 修改后的学习率衰减：100倍衰减 (从 5e-4 降到 5e-6) ---
@@ -157,7 +143,7 @@ def train(args, model, train_dataset, test_dataset, device):
         })
 
         if i % args.display_int == 0:
-            evaluate(args, model, test_dataset, device, i, axes)
+            evaluate(args, model, test_dataset, device, i, logger, lr)
 
     torch.save(model.state_dict(), os.path.join(args.exp_dir, "nerf_final.pth"))
 
