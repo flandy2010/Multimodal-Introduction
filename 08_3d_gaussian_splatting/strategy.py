@@ -47,7 +47,7 @@ class GaussianStrategy:
                  densification_interval=100,
                  opacity_reset_interval=3000,
                  grad_threshold=0.0002,
-                 max_points=200000):
+                 max_points=80000):
         self.densify_from_iter = densify_from_iter
         self.densify_until_iter = densify_until_iter
         self.densification_interval = densification_interval

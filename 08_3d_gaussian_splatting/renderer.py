@@ -2,9 +2,7 @@ import torch
 
 
 def quaternion_to_rotation_matrix(q):
-    """
-    四元数 [N, 4] (w, x, y, z) → 旋转矩阵 [N, 3, 3]
-    """
+    """四元数 [N, 4] (w, x, y, z) → 旋转矩阵 [N, 3, 3]"""
     w, x, y, z = q[:, 0], q[:, 1], q[:, 2], q[:, 3]
     R = torch.stack([
         1 - 2*y*y - 2*z*z, 2*x*y - 2*w*z,     2*x*z + 2*w*y,
@@ -16,104 +14,88 @@ def quaternion_to_rotation_matrix(q):
 
 def compute_2d_covariance(means3D, scales, rotations, w2c, K):
     """
-    将 3D 椭球投影为 2D 椭圆（协方差矩阵）
-    
-    原理：Σ_2D = J @ W @ Σ_3D @ W^T @ J^T
-    其中 Σ_3D = R @ S @ S @ R^T, J 是投影雅可比
-    
-    返回：cov2D_inv [N, 2, 2], det [N]（用于高斯求值）
+    3D 椭球 → 2D 椭圆协方差
+    Σ_2D = J @ W @ Σ_3D @ W^T @ J^T
+    返回：cov2D_inv [N, 2, 2], det [N], means_cam [N, 3]
     """
     N = means3D.shape[0]
     device = means3D.device
 
-    # 1. 构造 3D 协方差: Σ = R @ diag(s^2) @ R^T
-    R = quaternion_to_rotation_matrix(rotations)  # [N, 3, 3]
-    S = torch.diag_embed(scales)                   # [N, 3, 3]
-    RS = R @ S                                      # [N, 3, 3]
-    cov3D = RS @ RS.transpose(-1, -2)               # [N, 3, 3]
+    R = quaternion_to_rotation_matrix(rotations)
+    S = torch.diag_embed(scales)
+    RS = R @ S
+    cov3D = RS @ RS.transpose(-1, -2)
 
-    # 2. 变换到相机坐标系
-    W = w2c[:3, :3]  # [3, 3] 旋转部分
+    W = w2c[:3, :3]
     means_homo = torch.cat([means3D, torch.ones(N, 1, device=device)], dim=-1)
-    means_cam = (w2c @ means_homo.t()).t()[:, :3]  # [N, 3]
+    means_cam = (w2c @ means_homo.t()).t()[:, :3]
 
-    # 3. 投影雅可比 J (针对针孔相机)
     fx, fy = K[0, 0], K[1, 1]
     tx, ty, tz = means_cam[:, 0], means_cam[:, 1], means_cam[:, 2]
     tz_sq = tz * tz + 1e-8
 
-    # J = [[fx/tz, 0, -fx*tx/tz^2],
-    #      [0, fy/tz, -fy*ty/tz^2]]
     zeros = torch.zeros_like(tz)
     J = torch.stack([
         fx / tz, zeros,   -fx * tx / tz_sq,
         zeros,   fy / tz, -fy * ty / tz_sq,
     ], dim=-1).reshape(N, 2, 3)
 
-    # 4. Σ_2D = J @ W @ Σ_3D @ W^T @ J^T
-    JW = J @ W.unsqueeze(0)                 # [N, 2, 3]
-    cov2D = JW @ cov3D @ JW.transpose(-1, -2)  # [N, 2, 2]
+    JW = J @ W.unsqueeze(0)
+    cov2D = JW @ cov3D @ JW.transpose(-1, -2)
 
-    # 5. 加一个小的各向同性项防止奇异（低通滤波）
+    # 低通滤波防奇异
     cov2D[:, 0, 0] += 0.3
     cov2D[:, 1, 1] += 0.3
 
-    # 6. 计算逆和行列式
     a, b, c, d = cov2D[:, 0, 0], cov2D[:, 0, 1], cov2D[:, 1, 0], cov2D[:, 1, 1]
-    det = a * d - b * c + 1e-8
-    det = det.clamp(min=1e-8)
+    det = (a * d - b * c).clamp(min=1e-8)
 
     cov2D_inv = torch.stack([d, -b, -c, a], dim=-1).reshape(N, 2, 2) / det.unsqueeze(-1).unsqueeze(-1)
 
     return cov2D_inv, det, means_cam
 
 
-def simple_rasterizer(gaussians, w2c, K, H, W, camera_pos=None, tile_size=64):
+def simple_rasterizer(gaussians, w2c, K, H, W, camera_pos=None, tile_size=128):
     """
-    分块（Tile-based）可微栅格化器 - 各向异性版本
-    使用 2D 协方差矩阵渲染椭圆形高斯，支持 rotation 参数
+    Tile-based 各向异性可微栅格化器
+    优化：预计算 tile-point 归属表，避免每个 tile 重复做全局 mask
     """
     device = gaussians["means"].device
     means3D = gaussians["means"]
 
-    # 1. 计算 2D 协方差（椭圆投影）
+    # 1. 2D 协方差投影（对所有点一次性计算）
     cov2D_inv, cov2D_det, means_cam = compute_2d_covariance(
         means3D, gaussians["scales"], gaussians["rotations"], w2c, K
     )
+    depths = means_cam[:, 2:3]
 
-    depths = means_cam[:, 2:3]  # COLMAP: +Z 是前方
-
-    # 2. 过滤相机背后的点
+    # 2. Near clipping
     mask = depths.squeeze() > 0.1
     if not mask.any():
         return torch.zeros((H, W, 3), device=device) + means3D.sum() * 0
 
-    # 3. 投影到像素平面
+    # 3. 投影到像素
     fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
-    points_2d_x = fx * means_cam[mask, 0] / means_cam[mask, 2] + cx
-    points_2d_y = fy * means_cam[mask, 1] / means_cam[mask, 2] + cy
-    points_2d = torch.stack([points_2d_x, points_2d_y], dim=-1)  # [N_vis, 2]
+    mc = means_cam[mask]
+    points_2d = torch.stack([
+        fx * mc[:, 0] / mc[:, 2] + cx,
+        fy * mc[:, 1] / mc[:, 2] + cy,
+    ], dim=-1)
 
-    # 提取可见点属性
     colors = gaussians["colors"][mask]
     opacities = gaussians["opacity"][mask]
-    cov_inv = cov2D_inv[mask]     # [N_vis, 2, 2]
-    det = cov2D_det[mask]         # [N_vis]
+    cov_inv = cov2D_inv[mask]
 
-    # 计算等效半径（椭圆的最大半轴，用于视锥剔除和 3σ 截断）
-    # 从协方差矩阵的特征值估算
-    a = cov_inv[:, 0, 0]
-    d = cov_inv[:, 1, 1]
-    # 最大半径 ≈ 3 / sqrt(min eigenvalue of inv) ≈ 3 * sqrt(max eigenvalue of cov)
-    # 近似用 max(1/sqrt(a), 1/sqrt(d))
-    max_radius = 3.0 * torch.max(1.0 / (a.sqrt() + 1e-4), 1.0 / (d.sqrt() + 1e-4))  # [N_vis]
+    # 4. 等效半径估算（椭圆最大半轴的 3σ）
+    a_inv = cov_inv[:, 0, 0]
+    d_inv = cov_inv[:, 1, 1]
+    max_radius = 3.0 * torch.max(1.0 / (a_inv.sqrt() + 1e-4), 1.0 / (d_inv.sqrt() + 1e-4))
 
-    # 4. 视锥剔除
+    # 5. 视锥剔除：只保留覆盖范围与画面有交集的点
     in_frame = (
         (points_2d[:, 0] + max_radius > 0) & (points_2d[:, 0] - max_radius < W) &
         (points_2d[:, 1] + max_radius > 0) & (points_2d[:, 1] - max_radius < H)
     )
-
     if not in_frame.any():
         return torch.zeros((H, W, 3), device=device) + means3D.sum() * 0
 
@@ -124,7 +106,7 @@ def simple_rasterizer(gaussians, w2c, K, H, W, camera_pos=None, tile_size=64):
     max_radius = max_radius[in_frame]
     depths_vis = depths[mask][in_frame]
 
-    # 5. 按深度排序
+    # 6. 按深度排序（全局排一次）
     sort_idx = torch.argsort(depths_vis.squeeze(), descending=False)
     points_2d = points_2d[sort_idx]
     colors = colors[sort_idx]
@@ -132,74 +114,92 @@ def simple_rasterizer(gaussians, w2c, K, H, W, camera_pos=None, tile_size=64):
     cov_inv = cov_inv[sort_idx]
     max_radius = max_radius[sort_idx]
 
-    # 6. 分块渲染
-    output = torch.zeros((H, W, 3), device=device)
+    N_pts = len(points_2d)
+
+    # 7. 预计算 tile 归属：为每个 tile 找出影响它的点索引
     n_tiles_h = (H + tile_size - 1) // tile_size
     n_tiles_w = (W + tile_size - 1) // tile_size
 
+    # tile 边界张量 [n_tiles_h, n_tiles_w, 4] → (x_start, y_start, x_end, y_end)
+    tile_indices = []
+    pts_x = points_2d[:, 0]
+    pts_y = points_2d[:, 1]
+    pts_x_min = pts_x - max_radius  # [N]
+    pts_x_max = pts_x + max_radius
+    pts_y_min = pts_y - max_radius
+    pts_y_max = pts_y + max_radius
+
+    # 每个点覆盖的 tile 范围
+    tile_x_min = ((pts_x_min / tile_size).floor().clamp(min=0, max=n_tiles_w - 1)).int()
+    tile_x_max = ((pts_x_max / tile_size).floor().clamp(min=0, max=n_tiles_w - 1)).int()
+    tile_y_min = ((pts_y_min / tile_size).floor().clamp(min=0, max=n_tiles_h - 1)).int()
+    tile_y_max = ((pts_y_max / tile_size).floor().clamp(min=0, max=n_tiles_h - 1)).int()
+
+    # 构建每个 tile 的点索引列表
+    tile_point_lists = [[[] for _ in range(n_tiles_w)] for _ in range(n_tiles_h)]
+    # 向量化构建：遍历点（比遍历 tile 更高效，因为 tile 数量远大于每个点的覆盖 tile 数）
+    tx_min_cpu = tile_x_min.cpu().numpy()
+    tx_max_cpu = tile_x_max.cpu().numpy()
+    ty_min_cpu = tile_y_min.cpu().numpy()
+    ty_max_cpu = tile_y_max.cpu().numpy()
+
+    for i in range(N_pts):
+        for ty in range(ty_min_cpu[i], ty_max_cpu[i] + 1):
+            for tx in range(tx_min_cpu[i], tx_max_cpu[i] + 1):
+                tile_point_lists[ty][tx].append(i)
+
+    # 8. 分块渲染（使用预计算的索引）
+    output = torch.zeros((H, W, 3), device=device)
+    max_per_tile = 4000
+
     for ty in range(n_tiles_h):
         for tx in range(n_tiles_w):
+            pt_indices = tile_point_lists[ty][tx]
+            if not pt_indices:
+                continue
+
             y_start = ty * tile_size
             y_end = min(y_start + tile_size, H)
             x_start = tx * tile_size
             x_end = min(x_start + tile_size, W)
             tile_h = y_end - y_start
             tile_w = x_end - x_start
+            n_pixels = tile_h * tile_w
 
-            # 找出影响当前 tile 的点
-            tile_mask = (
-                (points_2d[:, 0] + max_radius > x_start) & (points_2d[:, 0] - max_radius < x_end) &
-                (points_2d[:, 1] + max_radius > y_start) & (points_2d[:, 1] - max_radius < y_end)
-            )
+            # 取出该 tile 的点（已按深度排好序）
+            idx_t = torch.tensor(pt_indices[:max_per_tile], device=device, dtype=torch.long)
+            t_pts = points_2d[idx_t]
+            t_colors = colors[idx_t]
+            t_opac = opacities[idx_t]
+            t_cov_inv = cov_inv[idx_t]
+            M = len(idx_t)
 
-            if not tile_mask.any():
-                continue
-
-            t_pts = points_2d[tile_mask]
-            t_colors = colors[tile_mask]
-            t_opac = opacities[tile_mask]
-            t_cov_inv = cov_inv[tile_mask]      # [M, 2, 2]
-            t_max_r = max_radius[tile_mask]
-
-            # 限制单 tile 内点数
-            max_per_tile = 4000
-            if len(t_pts) > max_per_tile:
-                t_pts = t_pts[:max_per_tile]
-                t_colors = t_colors[:max_per_tile]
-                t_opac = t_opac[:max_per_tile]
-                t_cov_inv = t_cov_inv[:max_per_tile]
-                t_max_r = t_max_r[:max_per_tile]
-
-            # 像素坐标网格
+            # 像素坐标
             gy, gx = torch.meshgrid(
                 torch.arange(y_start, y_end, device=device, dtype=torch.float32),
                 torch.arange(x_start, x_end, device=device, dtype=torch.float32),
                 indexing='ij'
             )
-            tile_coords = torch.stack([gx, gy], dim=-1).reshape(1, -1, 2) + 0.5  # [1, P, 2]
-            n_pixels = tile_h * tile_w
+            tile_coords = torch.stack([gx, gy], dim=-1).reshape(1, -1, 2) + 0.5
 
-            # 计算偏移 [M, P, 2]
-            delta = t_pts.unsqueeze(1) - tile_coords  # [M, P, 2]
+            # 各向异性高斯求值
+            delta = t_pts.unsqueeze(1) - tile_coords   # [M, P, 2]
+            # power = -0.5 * δ^T Σ^{-1} δ
+            # 展开: power = -0.5 * (δx² * a + 2*δx*δy * b + δy² * d) 其中 cov_inv = [[a,b],[c,d]]
+            dx = delta[:, :, 0]  # [M, P]
+            dy = delta[:, :, 1]
+            ci_a = t_cov_inv[:, 0, 0].unsqueeze(1)  # [M, 1]
+            ci_b = t_cov_inv[:, 0, 1].unsqueeze(1)
+            ci_d = t_cov_inv[:, 1, 1].unsqueeze(1)
+            power = -0.5 * (dx * dx * ci_a + 2 * dx * dy * ci_b + dy * dy * ci_d)  # [M, P]
 
-            # 各向异性高斯：power = -0.5 * delta^T @ Sigma_inv @ delta
-            # delta: [M, P, 2] → [M, P, 2, 1]
-            delta_col = delta.unsqueeze(-1)
-            # t_cov_inv: [M, 2, 2] → [M, 1, 2, 2]
-            cov_inv_exp = t_cov_inv.unsqueeze(1)
-            # [M, P, 2, 1] = [M, 1, 2, 2] @ [M, P, 2, 1]
-            tmp = (cov_inv_exp @ delta_col).squeeze(-1)  # [M, P, 2]
-            power = -0.5 * (delta.unsqueeze(-2) @ tmp.unsqueeze(-1)).squeeze(-1).squeeze(-1)  # [M, P]
-
-            # 3σ 截断：用 power < -4.5 近似（对应 3σ 处 exp(-4.5) ≈ 0.011）
+            # 3σ 截断
             valid = power > -4.5
             gaussian_weight = torch.exp(power) * valid.float()
 
-            # Alpha
-            alphas = (t_opac * gaussian_weight).unsqueeze(-1)  # [M, P, 1]
-            alphas = alphas.clamp(max=0.99)
+            # Alpha 合成
+            alphas = (t_opac * gaussian_weight).unsqueeze(-1).clamp(max=0.99)  # [M, P, 1]
 
-            # Alpha 合成 (Front-to-Back)
             one_minus_alpha = 1.0 - alphas
             transmittance = torch.cumprod(
                 torch.cat([torch.ones((1, n_pixels, 1), device=device), one_minus_alpha + 1e-6], dim=0),
