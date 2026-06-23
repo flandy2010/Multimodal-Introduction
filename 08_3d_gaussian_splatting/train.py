@@ -1,104 +1,134 @@
+import os
+import math
 import torch
-import torch.nn.functional as F
-import torch.optim as optim
-from tqdm import tqdm
+import argparse
 import numpy as np
-import matplotlib.pyplot as plt
+from tqdm import tqdm
 from dataloader import GSDataLoader
 from model import GaussianModel
+from logger import GSLogger
+from renderer import simple_rasterizer
+from strategy import GaussianStrategy
 
 
-def project_points(means3D, w2c, K, H, W):
-    """将 3D 点投影到 2D 像素坐标"""
-    # 转换到相机坐标系: [N, 3]
-    points_cam = (w2c[:3, :3] @ means3D.t()).t() + w2c[:3, 3]
+def train(args):
+    # 1. 环境准备
+    if args.device != "auto":
+        device = torch.device(args.device)
+    else:
+        device = torch.device(
+            "mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu")
+    print(f"🚀 3DGS 真实场景训练启动 | 设备: {device}")
 
-    # 深度 z
-    depths = points_cam[:, 2:3]
+    # 2. 数据准备与场景解析
+    # factor=16 时分辨率约 314x207，渲染速度合理；factor=8 精度更高但慢 4 倍
+    loader = GSDataLoader(args.data_path, factor=args.factor)
 
-    # 投影到屏幕: [N, 2]
-    points_2d = (K[:2, :2] @ (points_cam[:, :2] / depths).t()).t() + K[:2, 2]
+    # 获取 Parser 算出的场景参数
+    norm_params = loader.get_normalization_params()
+    scene_radius = norm_params["radius"]
 
-    # 简单的半径估算 (根据深度和初始缩放)
-    # 在真实 3DGS 中这是由协方差矩阵计算的，这里简化处理
-    radii = (100.0 / (depths + 1e-5))  # 随距离衰减的半径
+    # 获取初始点云 (关键！这是 3DGS 的灵魂)
+    initial_pcd = loader.get_initial_pcd()
 
-    return points_2d, depths, radii
+    # 3. 日志初始化
+    logger = GSLogger(args.exp_dir, args)
+    logger.log_dataset_stats(loader)
 
+    # 4. 模型初始化
+    # 传入场景半径 radius 和 初始点云 pcd
+    model = GaussianModel(
+        num_points=args.num_points,  # 如果 pcd 不为空，model 内部会优先使用 pcd 数量
+        radius=scene_radius,
+        pcd=initial_pcd
+    ).to(device)
 
-def simple_rasterizer(gaussians, w2c, K, H, W):
-    """
-    简易可微栅格化 (Pure PyTorch)
-    注意：为了演示，这里使用了简化版的 Point-based 渲染
-    """
-    means2D, depths, radii = project_points(gaussians["means"], w2c, K, H, W)
-    colors = gaussians["colors"]
-    opacities = gaussians["opacity"]
+    # 5. 策略初始化
+    strategy = GaussianStrategy(grad_threshold=args.grad_threshold)
 
-    # 1. 排序 (Depth Sorting) - 3DGS 的核心，从远到近
-    indices = torch.argsort(depths.squeeze(), descending=True)
+    # 6. 初始优化器 (使用 model 内部定义的分组学习率)
+    optimizer = torch.optim.Adam(model.get_optimizer_groups(args.lr), eps=1e-15)
 
-    # 2. 初始化画布
-    canvas = torch.zeros((H, W, 3), device=means2D.device)
+    moving_avg_loss = None
+    ema_alpha = 0.9
 
-    # 3. 渲染循环 (简化版：将高斯点绘制为圆形)
-    # 注意：在 100x100 下，我们直接用向量化方式模拟
-    grid_y, grid_x = torch.meshgrid(torch.arange(H), torch.arange(W), indexing='ij')
-    grid = torch.stack([grid_x, grid_y], dim=-1).to(means2D.device).float()  # [H, W, 2]
-
-    # 为了速度，我们只渲染前 500 个有效的、最近的高斯点（简化版演示）
-    # 真实的 3DGS 使用 Tile-based 栅格化，非常快
-    render_idx = indices[-500:]
-
-    for idx in render_idx:
-        mu = means2D[idx]
-        color = colors[idx]
-        alpha = opacities[idx]
-        r = radii[idx]
-
-        # 计算像素到中心的距离
-        dist_sq = torch.sum((grid - mu) ** 2, dim=-1)
-        # 高斯分布公式
-        g = torch.exp(-dist_sq / (2 * (r ** 2) + 1e-5))
-
-        # Alpha Blending (Over operator)
-        weighted_alpha = alpha * g
-        canvas = canvas * (1 - weighted_alpha.unsqueeze(-1)) + color * weighted_alpha.unsqueeze(-1)
-
-    return canvas
-
-
-def train():
-    device = torch.device(
-        "mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu")
-    loader = GSDataLoader()
-    model = GaussianModel(num_points=2000).to(device)
-    optimizer = optim.Adam(model.parameters(), lr=1e-3)
-
-    pbar = tqdm(range(2000))
+    pbar = tqdm(range(args.n_iters), desc="3DGS Training")
     for step in pbar:
-        # 随机选一个视角
+        # --- A. 学习率调度 (Cosine 衰减，温和下降) ---
+        progress = step / args.n_iters
+        decay_factor = 0.5 * (1 + math.cos(math.pi * progress))  # 从1.0平滑下降到0
+        decay_factor = max(decay_factor, 0.01)  # 最低保留 1%
+        curr_lr = args.lr * decay_factor
+        for param_group in optimizer.param_groups:
+            if "initial_lr" not in param_group:
+                param_group["initial_lr"] = param_group["lr"]
+            param_group['lr'] = param_group["initial_lr"] * decay_factor
+
+        # --- B. 渲染 ---
         idx = np.random.randint(len(loader.images))
         gt_image, w2c, K = loader.get_view_params(idx)
         gt_image, w2c, K = gt_image.to(device), w2c.to(device), K.to(device)
 
-        # 前向传播
         gaussians = model()
+        # 渲染器逻辑保持不变
         out_image = simple_rasterizer(gaussians, w2c, K, loader.H, loader.W)
 
-        # Loss
-        loss = F.mse_loss(out_image, gt_image)
+        # --- C. 损失与反向传播 ---
+        loss = strategy.get_loss(out_image, gt_image, model, step)
 
+        if loss.grad_fn is None:
+            continue
         optimizer.zero_grad()
         loss.backward()
+
+        # --- D. 密度策略介入 (Cloning/Pruning) ---
+        # 注意：这里可能会重置 optimizer，所以必须接收返回值
+        optimizer = strategy.step(step, model, optimizer)
+
+        # --- E. 参数更新与硬约束 ---
         optimizer.step()
 
-        if step % 100 == 0:
-            psnr = -10. * torch.log10(loss)
-            pbar.set_postfix({"PSNR": f"{psnr.item():.2f}"})
-            plt.imsave(f"gs_iter_{step}.png", out_image.detach().cpu().numpy().clip(0, 1))
+        # 执行 model 内部的 clamp 约束（防止点飞走或变巨大）
+        model.apply_constraints()
+
+        # --- F. 日志记录 ---
+        loss_val = loss.item()
+        moving_avg_loss = loss_val if moving_avg_loss is None else ema_alpha * moving_avg_loss + (
+                    1 - ema_alpha) * loss_val
+
+        pbar.set_postfix({
+            "Points": model.num_points,
+            "AvgL": f"{moving_avg_loss:.4f}",
+            "LR": f"{curr_lr:.1e}"
+        })
+
+        if step % args.display_int == 0 or step == args.n_iters - 1:
+            psnr, ssim = logger.log_combined(model, step, out_image, gt_image, curr_lr)
+            tqdm.write(f"🔔 [Step {step}] PSNR: {psnr:.2f} | SSIM: {ssim:.4f} | Points: {model.num_points}")
+
+    # 7. 保存结果
+    save_path = os.path.join(args.exp_dir, "gs_final.pth")
+    model.save_model(save_path)
+    print(f"✅ 训练完成！最终点数: {model.num_points}, 模型保存在: {save_path}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Modular 3DGS Trainer")
+    # 推荐路径
+    parser.add_argument("--data_path", type=str, default="../data/360_extra_scenes/flowers")
+    parser.add_argument("--exp_dir", type=str, default="./gs_runs/final_dance")
+
+    parser.add_argument("--factor", type=int, default=16, help="图像下采样倍率，16=快速迭代，8=高精度")
+    parser.add_argument("--num_points", type=int, default=1500, help="初始精兵简政，靠分裂增长")
+    parser.add_argument("--n_iters", type=int, default=5000)
+    parser.add_argument("--lr", type=float, default=1e-2)
+    parser.add_argument("--grad_threshold", type=float, default=0.0001, help="更激进的分裂阈值")
+    parser.add_argument("--display_int", type=int, default=10)
+    parser.add_argument("--device", type=str, default="auto")
+
+    args = parser.parse_args()
+    train(args)
 
 
 if __name__ == "__main__":
-
-    train()
+    main()
