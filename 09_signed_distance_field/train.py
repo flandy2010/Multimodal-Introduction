@@ -247,7 +247,7 @@ def main():
     parser.add_argument("--n_samples", type=int, default=64)
     parser.add_argument("--near", type=float, default=0.0)
     parser.add_argument("--far", type=float, default=2.2)
-    parser.add_argument("--init_radius", type=float, default=4.0, help="初始球体 SDF 半径")
+    parser.add_argument("--init_radius", type=float, default=0.5, help="初始球体 SDF 半径")
     parser.add_argument("--s_val", type=float, default=50.0, help="SDF→alpha 的 s 参数（最终值）")
     parser.add_argument("--s_val_init", type=float, default=5.0, help="SDF→alpha 的 s 参数（初始值）")
     parser.add_argument("--eikonal_weight", type=float, default=0.1, help="Eikonal Loss 权重")
