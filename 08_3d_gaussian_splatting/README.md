@@ -69,6 +69,13 @@ python train.py \
 ![error](examples/error02/step_0010.png)
 ![error](examples/error02/step_0020.png)
 
+### 长时间迭代但细节模糊
+- 现象：整体图形没有问题，但背景上有些纯色的圆圈，细节上很模糊
+- 原因：查了一下可能是最终点数受限（只有8w个），对于真实场景来说不太够用
+- 解决方案：增大椭球数量上限！
+
+![error](examples/error03_iter5000_psnr17.59.png)
+
 # 吐槽
 对于这个数据集来说，3DGS真的比Instant-NGP难训太多了：
 - 如果高斯点不在正确的位置，颜色就毫无意义；如果颜色不对，产生的梯度就会把位置带偏。
