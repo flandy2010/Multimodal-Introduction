@@ -45,6 +45,7 @@ def train(args):
         densification_interval=100,
         opacity_reset_interval=3000,
         grad_threshold=args.grad_threshold,
+        max_points=args.max_points,
     )
 
     # 6. 优化器（论文推荐的绝对学习率，不依赖外部 lr）
@@ -117,6 +118,7 @@ def main():
 
     parser.add_argument("--factor", type=int, default=8, help="Image downscale factor")
     parser.add_argument("--num_points", type=int, default=50000, help="Max initial points")
+    parser.add_argument("--max_points", type=int, default=1000000, help="Max total points")
     parser.add_argument("--n_iters", type=int, default=30000)
     parser.add_argument("--sh_degree", type=int, default=3, help="SH degree (0=DC, 3=full)")
     parser.add_argument("--tile_size", type=int, default=128, help="Render tile size")

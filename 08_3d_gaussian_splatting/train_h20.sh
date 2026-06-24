@@ -20,6 +20,7 @@ python train.py \
     --exp_dir $EXP_DIR \
     --factor 4 \
     --num_points 50000 \
+    --max_points 1000000 \
     --n_iters 30000 \
     --sh_degree 3 \
     --tile_size 64 \
