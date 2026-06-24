@@ -47,6 +47,7 @@ python train.py \
 - 原因：模型学会了去贴上颜色，但并没有真正学到几何结构。结合训练日志判断发现：
   - iter=12000的时候，Eikonal Loss仍维持在33-35，说明模型完全没有遵守SDF的基本物理原则。
   - s_val从5增加到了400，但在SDF场还没学好的情况下加锐化导致模型摆烂。
+  - 还发现了代码在计算Eikonal Loss的时候没有做归一化的bug
 - 解决方案：加大Eikonal Loss的权重，约束s_val的增长速度/将s改成可学习参数
 
 ![error](examples/error02_iter12000_psnr28.png)

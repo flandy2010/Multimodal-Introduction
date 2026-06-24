@@ -69,13 +69,15 @@ def render_rays_sdf(sdf_net, color_net, rays_o, rays_d, near, far, n_samples, s_
 
     z_vals = t_vals.expand(rays_o.shape[:-1] + (n_samples,))
 
-    # 采样 3D 点
-    pts = rays_o[..., None, :] + rays_d[..., None, :] * z_vals[..., :, None]
+    # 归一化射线方向（SDF 体渲染必须！z_vals 要对应真实欧氏距离）
+    rays_d_norm = rays_d / (rays_d.norm(dim=-1, keepdim=True) + 1e-8)
+
+    # 采样 3D 点（用归一化后的方向）
+    pts = rays_o[..., None, :] + rays_d_norm[..., None, :] * z_vals[..., :, None]
     H_img, W_img = rays_o.shape[0], rays_o.shape[1]
 
-    # 归一化视角方向（用于颜色网络）
-    dirs_norm = rays_d / (rays_d.norm(dim=-1, keepdim=True) + 1e-8)
-    dirs_expanded = dirs_norm[..., None, :].expand_as(pts)
+    # 视角方向（已归一化）
+    dirs_expanded = rays_d_norm[..., None, :].expand_as(pts)
 
     # Flatten
     flat_pts = pts.reshape(-1, 3)
@@ -104,9 +106,13 @@ def render_rays_sdf(sdf_net, color_net, rays_o, rays_d, near, far, n_samples, s_
         n_surface = n_eik // 2
         perm = torch.randperm(flat_pts.shape[0], device=rays_o.device)[:n_surface]
         surface_pts = flat_pts[perm].detach().clone()
-        # 一半随机空间点
+        # 一半随机空间点（覆盖射线有效范围，而非只在原点附近）
         n_random = n_eik - n_surface
-        random_pts = torch.empty(n_random, 3, device=rays_o.device).uniform_(-1.5, 1.5)
+        # 根据 flat_pts 的实际范围动态决定采样范围
+        with torch.no_grad():
+            pts_min = flat_pts.min(dim=0)[0]
+            pts_max = flat_pts.max(dim=0)[0]
+        random_pts = torch.rand(n_random, 3, device=rays_o.device) * (pts_max - pts_min) + pts_min
         # 合并
         eik_pts = torch.cat([surface_pts, random_pts], dim=0)
         eik_pts.requires_grad_(True)
@@ -246,6 +252,8 @@ def train(args):
 
         optimizer.zero_grad()
         loss.backward()
+        # 梯度裁剪（宽松值，只防数值爆炸，不阻碍 Eikonal 收敛）
+        torch.nn.utils.clip_grad_norm_(sdf_net.parameters(), max_norm=10.0)
         optimizer.step()
 
         last_eikonal = loss_eikonal.item()
