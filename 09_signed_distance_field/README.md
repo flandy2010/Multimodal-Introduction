@@ -12,10 +12,23 @@ pip install -r requirements.txt
 # 使用介绍
 
 ###  数据下载
-```shell
-```
+使用仅2D图片，预测d->sigma的方式进行训练，复用NeRF的训练集，放在公共路径下的`tiny_nerf_data.npz`。
 
 ### 模型训练
+```shell
+# shell脚本
+bash train.sh
+
+# python命令
+python train.py \
+    --init_radius 1.0 \
+    --s_val 400.0 \
+    --n_samples 128 \
+    --n_iters 20000 \
+    --display_int 100 \
+    --exp_dir ./runs/demo02 \
+    --device mps
+```
 
 ### 模型推理
 
