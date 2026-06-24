@@ -22,11 +22,12 @@ bash train.sh
 # python命令
 python train.py \
     --init_radius 1.0 \
-    --s_val 400.0 \
+    --s_val_init 3.0 \
+    --eikonal_weight 0.5 \
     --n_samples 128 \
     --n_iters 20000 \
-    --display_int 100 \
-    --exp_dir ./runs/demo02 \
+    --display_int 500 \
+    --exp_dir ./runs/demo01 \
     --device mps
 ```
 
@@ -45,8 +46,8 @@ python train.py \
 - 现象：iter=12000的时候，PSNR达到28，但z=0的边界切片非常不规整。图片背景（红色区域）布满了明显的方块状纹理，像是在一张有格子的纸上画画。
 - 原因：模型学会了去贴上颜色，但并没有真正学到几何结构。结合训练日志判断发现：
   - iter=12000的时候，Eikonal Loss仍维持在33-35，说明模型完全没有遵守SDF的基本物理原则。
-  - s_val从5增加到了400，但在SDF场还没学好的情况下加锐化导致模型摆烂
-- 解决方案：加大Eikonal Loss的权重，约束s_val的增长速度，增加采样范围
+  - s_val从5增加到了400，但在SDF场还没学好的情况下加锐化导致模型摆烂。
+- 解决方案：加大Eikonal Loss的权重，约束s_val的增长速度/将s改成可学习参数
 
 ![error](examples/error02_iter12000_psnr28.png)
 <p align="center">

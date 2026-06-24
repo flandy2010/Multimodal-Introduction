@@ -58,16 +58,17 @@ class SDFLogger:
             "error_map": error_map,
         }
 
-    def log_evaluation(self, step, metrics, lr, loss_eikonal=0.0):
+    def log_evaluation(self, step, metrics, lr, loss_eikonal=0.0, s_val=None):
         with open(self.log_file, "a") as f:
             if not self._table_started:
                 f.write("## 训练进度\n\n")
-                f.write("| Step | PSNR | SSIM | MaxErr | MeanErr | Eikonal | LR |\n")
-                f.write("| ---: | ---: | ---: | ---: | ---: | ---: | :--- |\n")
+                f.write("| Step | PSNR | SSIM | MaxErr | MeanErr | Eikonal | s | LR |\n")
+                f.write("| ---: | ---: | ---: | ---: | ---: | ---: | ---: | :--- |\n")
                 self._table_started = True
+            s_str = f"{s_val:.2f}" if s_val is not None else "-"
             f.write(f"| {step} | {metrics['psnr']:.2f} | {metrics['ssim']:.4f} | "
                     f"{metrics['max_error']:.4f} | {metrics['mean_error']:.4f} | "
-                    f"{loss_eikonal:.4f} | {lr:.2e} |\n")
+                    f"{loss_eikonal:.4f} | {s_str} | {lr:.2e} |\n")
 
     def print_analysis(self, step, metrics, lr):
         psnr = metrics['psnr']
@@ -129,10 +130,10 @@ class SDFLogger:
         plt.savefig(os.path.join(self.vis_dir, f"sdf_{step:05d}.png"), bbox_inches='tight', dpi=100)
         plt.close(fig)
 
-    def evaluate_and_log(self, step, pred, gt, lr, loss_eikonal=0.0, sdf_net=None, device=None):
+    def evaluate_and_log(self, step, pred, gt, lr, loss_eikonal=0.0, s_val=None, sdf_net=None, device=None):
         """一站式：指标 + 日志 + 可视化 + SDF 切面"""
         metrics = self.calculate_image_metrics(pred, gt)
-        self.log_evaluation(step, metrics, lr, loss_eikonal)
+        self.log_evaluation(step, metrics, lr, loss_eikonal, s_val=s_val)
         self.print_analysis(step, metrics, lr)
         self.save_visualization(step, pred, gt, metrics)
 

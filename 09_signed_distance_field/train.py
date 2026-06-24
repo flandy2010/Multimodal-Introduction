@@ -4,7 +4,7 @@ import numpy as np
 import argparse
 import os
 from tqdm import tqdm
-from model import SDFNetwork, ColorNetwork
+from model import SDFNetwork, ColorNetwork, LearnableVariance
 from dataloader import TinySDFDataset
 from logger import SDFLogger
 
@@ -175,6 +175,7 @@ def evaluate(args, sdf_net, color_net, test_dataset, device, step, logger, lr, l
     psnr = logger.evaluate_and_log(
         step, rgb_pred, target_img, lr,
         loss_eikonal=loss_eikonal_val,
+        s_val=eval_s if isinstance(eval_s, (int, float)) else eval_s.item(),
         sdf_net=sdf_net, device=device
     )
 
@@ -196,12 +197,14 @@ def train(args):
     # 模型
     sdf_net = SDFNetwork(init_radius=args.init_radius).to(device)
     color_net = ColorNetwork().to(device)
+    variance = LearnableVariance(init_val=args.s_val_init).to(device)  # 可学习的 s 参数
 
-    # 优化器（与 06 NeRF 类似的指数衰减）
-    optimizer = torch.optim.Adam(
-        list(sdf_net.parameters()) + list(color_net.parameters()),
-        lr=args.lr
-    )
+    # 优化器：s 参数用独立的较高学习率（NeuS 论文做法）
+    optimizer = torch.optim.Adam([
+        {'params': sdf_net.parameters(), 'lr': args.lr},
+        {'params': color_net.parameters(), 'lr': args.lr},
+        {'params': variance.parameters(), 'lr': args.lr * 10.0},  # s 需要快速适应
+    ])
 
     # Logger
     logger = SDFLogger(args.exp_dir, args)
@@ -214,12 +217,6 @@ def train(args):
             pg['lr'] = new_lr
         return new_lr
 
-    # --- s 值退火：从软到硬 ---
-    def get_s(step):
-        # 从 s_val_init 线性增长到 s_val
-        progress = min(step / (args.n_iters * 0.8), 1.0)
-        return args.s_val_init + (args.s_val - args.s_val_init) * progress
-
     last_eikonal = 0.0
     pbar = tqdm(range(args.n_iters), desc="SDF Training")
 
@@ -228,7 +225,7 @@ def train(args):
         color_net.train()
 
         lr = update_lr(step)
-        s_curr = get_s(step)
+        s_curr = variance.s  # 可学习的 s，不再手动退火
 
         idx = np.random.randint(len(train_dataset))
         target_img, target_pose = train_dataset[idx]
@@ -253,21 +250,23 @@ def train(args):
 
         last_eikonal = loss_eikonal.item()
         psnr_val = -10. * torch.log10(loss_color.detach())
+        s_val_now = s_curr.item() if isinstance(s_curr, torch.Tensor) else s_curr
 
         pbar.set_postfix({
             "LR": f"{lr:.2e}",
             "PSNR": f"{psnr_val.item():.2f}",
             "Eik": f"{last_eikonal:.4f}",
-            "s": f"{s_curr:.1f}",
+            "s": f"{s_val_now:.2f}",
         })
 
         if step % args.display_int == 0:
-            evaluate(args, sdf_net, color_net, test_dataset, device, step, logger, lr, last_eikonal, s_curr)
+            evaluate(args, sdf_net, color_net, test_dataset, device, step, logger, lr, last_eikonal, s_val_now)
 
     # 保存
     torch.save({
         'sdf_net': sdf_net.state_dict(),
         'color_net': color_net.state_dict(),
+        'variance': variance.state_dict(),
     }, os.path.join(args.exp_dir, "sdf_final.pth"))
     print(f"Done! Saved: {args.exp_dir}/sdf_final.pth")
 

@@ -119,9 +119,29 @@ class ColorNetwork(nn.Module):
         return self.layers(torch.cat([pts, d_embed, features], dim=-1))
 
 
+class LearnableVariance(nn.Module):
+    """
+    NeuS 的可学习 s 参数（论文中称为 variance / inv_s）
+    s = exp(log_s)，用 exp 保证 s > 0
+    初始值通常设为 ln(init_val)，如 init_val=3 → log_s=ln(3)≈1.1
+    """
+    def __init__(self, init_val=3.0):
+        super().__init__()
+        # 存储 log(s)，用 exp 取出 s，保证 s > 0
+        self.log_s = nn.Parameter(torch.tensor(np.log(init_val), dtype=torch.float32))
+
+    @property
+    def s(self):
+        return torch.exp(self.log_s)
+
+    def forward(self):
+        return self.s
+
+
 if __name__ == '__main__':
     sdf_net = SDFNetwork()
     color_net = ColorNetwork()
+    variance = LearnableVariance(init_val=3.0)
 
     pts = torch.randn(100, 3)
     dirs = torch.randn(100, 3)
@@ -129,5 +149,7 @@ if __name__ == '__main__':
 
     sdf, feats = sdf_net(pts)
     rgb = color_net(pts, dirs, feats)
+    s = variance()
+    print(f"SDF shape: {sdf.shape}, s = {s.item():.4f}")
     print(f"SDF shape: {sdf.shape}, range: [{sdf.min():.3f}, {sdf.max():.3f}]")
     print(f"RGB shape: {rgb.shape}, range: [{rgb.min():.3f}, {rgb.max():.3f}]")
