@@ -55,15 +55,46 @@ class GaussianStrategy:
         self.grad_threshold = grad_threshold
         self.max_points = max_points
 
-    def step(self, step, model, optimizer):
-        """每步调用：密度控制 + 透明度重置"""
+    # def step(self, step, model, optimizer):
+    #     """每步调用：密度控制 + 透明度重置"""
+    #
+    #     # 密度控制：每 100 步执行
+    #     if (step >= self.densify_from_iter and
+    #             step < self.densify_until_iter and
+    #             step % self.densification_interval == 0 and
+    #             model.num_points < self.max_points):
+    #         max_scale = model.radius * 0.1  # 剔除场景级巨球
+    #         optimizer = model.densify_and_prune(
+    #             optimizer,
+    #             grad_threshold=self.grad_threshold,
+    #             min_opacity=0.005,
+    #             max_scale=max_scale,
+    #         )
+    #         print(f"📊 [Step {step}] Densify: {model.num_points} points")
+    #
+    #     # 透明度重置：每 3000 步
+    #     if step > 0 and step % self.opacity_reset_interval == 0:
+    #         model.reset_opacity()
+    #         print(f"🧹 [Step {step}] Opacity reset")
+    #
+    #     return optimizer
 
-        # 密度控制：每 100 步执行
+    def step(self, step, model, optimizer, viewspace_points=None):  # 增加参数
+        """每步调用：增加梯度累积 + 密度控制 + 透明度重置"""
+
+        # --- 新增：梯度累积 (SDF 训练不需要，但 3DGS 必须有) ---
+        # 只有在致密化区间内，才需要累积 2D 梯度
+        if step < self.densify_until_iter and viewspace_points is not None:
+            # 这个方法需要在你的 GaussianModel 中实现，用来记录 viewspace_points.grad
+            model.update_densification_stats(viewspace_points)
+
+        # 密度控制：每 100 步执行 (保持不变)
         if (step >= self.densify_from_iter and
                 step < self.densify_until_iter and
                 step % self.densification_interval == 0 and
                 model.num_points < self.max_points):
-            max_scale = model.radius * 0.1  # 剔除场景级巨球
+            max_scale = model.radius * 0.1
+            # 执行真正的分裂/克隆/剔除
             optimizer = model.densify_and_prune(
                 optimizer,
                 grad_threshold=self.grad_threshold,
@@ -72,7 +103,7 @@ class GaussianStrategy:
             )
             print(f"📊 [Step {step}] Densify: {model.num_points} points")
 
-        # 透明度重置：每 3000 步
+        # 透明度重置 (保持不变)
         if step > 0 and step % self.opacity_reset_interval == 0:
             model.reset_opacity()
             print(f"🧹 [Step {step}] Opacity reset")

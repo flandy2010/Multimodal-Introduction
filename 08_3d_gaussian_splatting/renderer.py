@@ -1,4 +1,56 @@
 import torch
+import torch.nn.functional as F
+from gsplat import rasterization
+
+def gsplat_rasterizer(gaussians, w2c, K, H, W, tile_size=16):
+    """
+    作为 simple_rasterizer 的直接替代品。
+    gaussians: 一个字典或对象，包含 means, scales, quats, opacities, colors/shs
+    w2c: [4, 4] 矩阵 (World-to-Camera)
+    K: [3, 3] 矩阵 (Camera Intrinsics)
+    """
+    # 1. 提取参数并进行必要的激活 (假设模型存储的是原始值)
+    means = gaussians["means"]  # [N, 3]
+    scales = torch.exp(gaussians["scales"])  # [N, 3] 尺度通常在对数空间
+    quats = F.normalize(gaussians["quats"], p=2, dim=-1)  # [N, 4] 必须单位化
+    opacities = torch.sigmoid(gaussians["opacities"])  # [N, 1] 透明度 [0, 1]
+
+    # 获取颜色 (如果是三阶球谐函数，gsplat 会自动处理)
+    # 注意：如果你的 model() 已经根据 camera_pos 算好了颜色，直接取
+    colors = gaussians["colors"]  # [N, 3] 或 [N, 48, 3]
+
+    # 2. 构造 viewmat (gsplat 需要 [4, 4])
+    viewmat = w2c
+
+    # 3. 调用 gsplat 加速渲染
+    # render_colors: [H, W, 3]
+    # info: 包含 densification 需要的 viewspace_points 梯度信息
+    render_colors, render_alphas, info = rasterization(
+        means=means,
+        quats=quats,
+        scales=scales,
+        opacities=opacities,
+        colors=colors[..., None, :] if colors.dim() == 2 else colors,  # 适配格式
+        viewmat=viewmat,
+        K=K,
+        width=W,
+        height=H,
+        tile_size=tile_size,
+        # sh_degree = 3 # 如果传入的是 SH，取消注释
+    )
+
+    # 重要：为了让 strategy.step 能拿到梯度进行致密化，
+    # 我们需要把 info 里的 viewspace 梯度保留下来
+    if means.requires_grad:
+        # 这个操作会将 gsplat 的中间变量暴露给 PyTorch 的 backward
+        # 你的 strategy.step 内部需要用到这个 grad
+        means2d = info["means2d"]
+        means2d.retain_grad()
+        # 将其临时挂载到返回的 image 上，以便后面能通过 image.metadata 找到（或者直接用全局变量）
+        # 这里为了最小修改，我们将它存在 gaussians 字典里供后面提取
+        gaussians["viewspace_points"] = means2d
+
+    return render_colors
 
 
 def quaternion_to_rotation_matrix(q):

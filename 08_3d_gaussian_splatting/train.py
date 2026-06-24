@@ -7,7 +7,7 @@ from tqdm import tqdm
 from dataloader import GSDataLoader
 from model import GaussianModel
 from logger import GSLogger
-from renderer import simple_rasterizer
+from renderer import simple_rasterizer, gsplat_rasterizer
 from strategy import GaussianStrategy
 
 
@@ -73,9 +73,11 @@ def train(args):
         gt_image, w2c, K, camera_pos = gt_image.to(device), w2c.to(device), K.to(device), camera_pos.to(device)
 
         gaussians = model(camera_pos=camera_pos)
-        out_image = simple_rasterizer(gaussians, w2c, K, loader.H, loader.W, tile_size=args.tile_size)
+        # out_image = simple_rasterizer(gaussians, w2c, K, loader.H, loader.W, tile_size=args.tile_size)
+        out_image = gsplat_rasterizer(gaussians, w2c, K, loader.H, loader.W, tile_size=args.tile_size)
 
         # --- C. 损失 ---
+        viewspace_points = gaussians.get("viewspace_points", None)
         loss = strategy.get_loss(out_image, gt_image, model, step)
 
         if loss.grad_fn is None:
@@ -84,7 +86,8 @@ def train(args):
         loss.backward()
 
         # --- D. 密度策略 ---
-        optimizer = strategy.step(step, model, optimizer)
+        # optimizer = strategy.step(step, model, optimizer)
+        optimizer = strategy.step(step, model, optimizer, viewspace_points=viewspace_points)
 
         # --- E. 更新 + 约束 ---
         optimizer.step()
