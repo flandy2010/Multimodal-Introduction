@@ -27,3 +27,15 @@ pip install -r requirements.txt
 - 解决方案：参考volSFT和NeuS的alpha计算方式
 
 ![error](examples/error01_iter5000_psnr14.png)
+
+### PSNR较高但边缘不清晰
+- 现象：iter=12000的时候，PSNR达到28，但z=0的边界切片非常不规整。图片背景（红色区域）布满了明显的方块状纹理，像是在一张有格子的纸上画画。
+- 原因：模型学会了去贴上颜色，但并没有真正学到几何结构。结合训练日志判断发现：
+  - iter=12000的时候，Eikonal Loss仍维持在33-35，说明模型完全没有遵守SDF的基本物理原则
+  - s_val从5增加到了400，但在SDF场还没学好的情况下加锐化导致模型摆烂
+- 解决方案：加大Eikonal Loss的权重，约束s_val的增长速度，增加采样范围
+
+![error](examples/error02_iter12000_psnr28.png)
+<p align="center">
+  <img src="examples/error02_iter12000_sdf_slice.png" alt="error">
+</p>
