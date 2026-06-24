@@ -9,6 +9,37 @@ from dataloader import TinySDFDataset
 from logger import SDFLogger
 
 
+def neus_sdf_to_alpha(sdf, s_val):
+    """
+    SDF 转 Alpha (NeuS 无偏离散版本)
+    输入 sdf: [H, W, n_samples]
+    """
+    # 1. 计算所有采样点的 CDF (Cumulative Distribution Function)
+    # 在 NeuS 中，Phi(x) = sigmoid(s * x)
+    # 当点在外面 (SDF > 0)，Phi 趋近于 1
+    # 当点在里面 (SDF < 0)，Phi 趋近于 0
+    phi = torch.sigmoid(sdf * s_val)
+
+    # 2. 提取相邻的 CDF 对
+    # 假设光线方向上，点 i 是 prev，点 i+1 是 next
+    phi_i = phi[..., :-1]      # [H, W, n_samples-1]
+    phi_i_plus_1 = phi[..., 1:]  # [H, W, n_samples-1]
+
+    # 3. 计算 Alpha
+    # 公式：alpha = max(0, (Phi_i - Phi_i+1) / Phi_i)
+    # 这个公式的逻辑是：如果 Phi 在下降，说明进入了物体，alpha 应该变大
+    alpha = (phi_i - phi_i_plus_1) / (phi_i + 1e-10)
+    alpha = torch.clamp(alpha, min=0.0, max=1.0)
+
+    # 4. 补齐最后一帧
+    # 因为 n 个采样点只能产生 n-1 个 alpha 区间，我们需要补齐最后一点
+    # 否则你的渲染结果会少一层。
+    last_alpha = torch.zeros_like(alpha[..., :1])
+    alpha = torch.cat([alpha, last_alpha], dim=-1)
+
+    return alpha
+
+
 def get_rays(H, W, focal, c2w):
     """与 06 NeRF 相同的射线生成"""
     i, j = torch.meshgrid(torch.linspace(0, W - 1, W), torch.linspace(0, H - 1, H), indexing='ij')
@@ -84,11 +115,20 @@ def render_rays_sdf(sdf_net, color_net, rays_o, rays_d, near, far, n_samples, s_
     rgb_r = rgb_all.reshape(H_img, W_img, n_samples, 3)     # [H, W, S, 3]
 
     # 计算alpha
-    dists = z_vals[..., 1:] - z_vals[..., :-1]
-    dists = torch.cat([dists, torch.Tensor([1e-2]).expand(dists[..., :1].shape).to(rays_o.device)], -1)
+    def get_alpha_volsdf(sdf, s_val, dists):
+        # 方式一：VolSDF 风格（基于密度转换，收敛稳）
+        sigma = s_val * torch.sigmoid(-sdf * s_val)
+        return 1.0 - torch.exp(-sigma * dists)
 
-    sigma = s_val * torch.sigmoid(-sdf_r * s_val)
-    alpha = 1.0 - torch.exp(-sigma * dists)
+    def get_alpha_neus(sdf, s_val):
+        # 方式二：NeuS 风格（基于 CDF 差值，表面锐利）
+        phi = torch.sigmoid(sdf * s_val)
+        alpha = torch.clamp((phi[..., :-1] - phi[..., 1:]) / (phi[..., :-1] + 1e-10), min=0.0)
+        return torch.cat([alpha, torch.zeros_like(alpha[..., :1])], dim=-1)
+
+    dists = torch.cat([z_vals[..., 1:] - z_vals[..., :-1], torch.full_like(z_vals[..., :1], 1e-2)], -1)
+    alpha = get_alpha_volsdf(sdf_r, s_val, dists)   # 推荐用于训练初期快速出形状
+    # alpha = get_alpha_neus(sdf_r, s_val)            # 推荐用于精细模型导出
 
     # 正确的 Transmittance 公式（与 06 NeRF 一致）
     transmittance = torch.cumprod(
@@ -104,7 +144,7 @@ def render_rays_sdf(sdf_net, color_net, rays_o, rays_d, near, far, n_samples, s_
 
 
 @torch.no_grad()
-def evaluate(args, sdf_net, color_net, test_dataset, device, step, logger, lr, loss_eikonal_val):
+def evaluate(args, sdf_net, color_net, test_dataset, device, step, logger, lr, loss_eikonal_val, s_curr=None):
     sdf_net.eval()
     color_net.eval()
 
@@ -112,11 +152,14 @@ def evaluate(args, sdf_net, color_net, test_dataset, device, step, logger, lr, l
     target_img, target_pose = target_img.to(device), target_pose.to(device)
     H, W, focal = test_dataset.H, test_dataset.W, test_dataset.focal
 
+    # 使用当前训练的 s 值（而非最终目标 s_val），保证 evaluate 和 train 一致
+    eval_s = s_curr if s_curr is not None else args.s_val
+
     rays_o, rays_d = get_rays(H, W, focal, target_pose)
     rgb_pred, _ = render_rays_sdf(
         sdf_net, color_net, rays_o, rays_d,
-        near=args.near, far=args.far, n_samples=args.n_samples, s_val=args.s_val,
-        compute_eikonal=False  # evaluate 时不算 Eikonal（在 no_grad 下无法求梯度）
+        near=args.near, far=args.far, n_samples=args.n_samples, s_val=eval_s,
+        compute_eikonal=False
     )
 
     psnr = logger.evaluate_and_log(
@@ -209,7 +252,7 @@ def train(args):
         })
 
         if step % args.display_int == 0:
-            evaluate(args, sdf_net, color_net, test_dataset, device, step, logger, lr, last_eikonal)
+            evaluate(args, sdf_net, color_net, test_dataset, device, step, logger, lr, last_eikonal, s_curr)
 
     # 保存
     torch.save({
