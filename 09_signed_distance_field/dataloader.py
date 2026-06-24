@@ -1,15 +1,35 @@
+import os
 import numpy as np
 import torch
-import os
+from torch.utils.data import Dataset
 
-class TinySDFLoader:
-    def __init__(self, data_path="../data/tiny_nerf_data.npz"):
-        data = np.load(data_path)
-        self.images = torch.from_numpy(data['images']).float()
-        self.poses = torch.from_numpy(data['poses']).float()
+
+class TinySDFDataset(Dataset):
+    """与 06 NeRF 的 TinyNeRFDataset 保持一致的数据加载接口"""
+
+    def __init__(self, data_path="../data/tiny_nerf_data.npz", mode='train', test_idx=101):
+        if not os.path.exists(data_path):
+            raise FileNotFoundError(f"找不到数据集: {data_path}")
+
+        data = np.load(data_path, allow_pickle=True)
+        images = data['images']  # (106, 100, 100, 3)
+        poses = data['poses']   # (106, 4, 4)
         self.focal = float(data['focal'])
-        self.H, self.W = self.images.shape[1:3]
-        print(f"✅ Data Loaded: {self.H}x{self.W}, Images: {len(self.images)}")
+        self.H, self.W = images.shape[1:3]
 
-    def get_all(self):
-        return self.images, self.poses, self.focal
+        if mode == 'train':
+            self.images = images[:test_idx]
+            self.poses = poses[:test_idx]
+        else:
+            self.images = images[test_idx:]
+            self.poses = poses[test_idx:]
+
+        print(f"SDF Data [{mode}]: {self.H}x{self.W}, {len(self.images)} images")
+
+    def __len__(self):
+        return len(self.images)
+
+    def __getitem__(self, idx):
+        image = torch.from_numpy(self.images[idx]).float()
+        pose = torch.from_numpy(self.poses[idx]).float()
+        return image, pose
