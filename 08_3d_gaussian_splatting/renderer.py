@@ -12,15 +12,19 @@ def gsplat_rasterizer(gaussians, w2c, K, H, W, tile_size=16):
     # 1. 提取参数并进行必要的激活 (假设模型存储的是原始值)
     means = gaussians["means"]  # [N, 3]
     scales = torch.exp(gaussians["scales"])  # [N, 3] 尺度通常在对数空间
-    quats = F.normalize(gaussians["quats"], p=2, dim=-1)  # [N, 4] 必须单位化
-    opacities = torch.sigmoid(gaussians["opacities"])  # [N, 1] 透明度 [0, 1]
+    quats = F.normalize(gaussians["rotations"], p=2, dim=-1)  # [N, 4] 必须单位化
+    opacities = torch.sigmoid(gaussians["opacity"])  # [N, 1] 透明度 [0, 1]
+    opacities = opacities.squeeze(-1)
 
     # 获取颜色 (如果是三阶球谐函数，gsplat 会自动处理)
     # 注意：如果你的 model() 已经根据 camera_pos 算好了颜色，直接取
     colors = gaussians["colors"]  # [N, 3] 或 [N, 48, 3]
 
     # 2. 构造 viewmat (gsplat 需要 [4, 4])
-    viewmat = w2c
+    viewmat = w2c.view(-1, 4, 4)
+
+    if len(K.shape) == 2:
+        K = K.unsqueeze(0)
 
     # 3. 调用 gsplat 加速渲染
     # render_colors: [H, W, 3]
@@ -30,9 +34,9 @@ def gsplat_rasterizer(gaussians, w2c, K, H, W, tile_size=16):
         quats=quats,
         scales=scales,
         opacities=opacities,
-        colors=colors[..., None, :] if colors.dim() == 2 else colors,  # 适配格式
-        viewmat=viewmat,
-        K=K,
+        colors=colors,
+        viewmats=viewmat,
+        Ks=K,
         width=W,
         height=H,
         tile_size=tile_size,
