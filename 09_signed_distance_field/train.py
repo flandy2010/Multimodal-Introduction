@@ -48,11 +48,9 @@ def render_rays_sdf(sdf_net, color_net, rays_o, rays_d, near, far, n_samples, s_
 
     # Flatten
     flat_pts = pts.reshape(-1, 3)
-    if compute_eikonal:
-        flat_pts.requires_grad_(True)  # Eikonal Loss 需要梯度
     flat_dirs = dirs_expanded.reshape(-1, 3)
 
-    # 分 chunk 前向（防止 OOM）
+    # --- 主干前向（不带梯度追踪，快速）---
     chunk = 1024 * 32
     sdf_list, rgb_list = [], []
     for i in range(0, flat_pts.shape[0], chunk):
@@ -66,11 +64,15 @@ def render_rays_sdf(sdf_net, color_net, rays_o, rays_d, near, far, n_samples, s_
     sdf_all = torch.cat(sdf_list, 0)   # [H*W*n_samples, 1]
     rgb_all = torch.cat(rgb_list, 0)    # [H*W*n_samples, 3]
 
-    # --- Eikonal Loss（仅训练时计算）---
+    # --- Eikonal Loss（随机采样少量点，避免对全部 128 万点求二阶梯度）---
     if compute_eikonal:
+        n_eik = 5000  # 只采 5000 个点算 Eikonal，足够提供正则信号
+        eik_pts = torch.empty(n_eik, 3, device=rays_o.device).uniform_(-1.5, 1.5)
+        eik_pts.requires_grad_(True)
+        eik_sdf, _ = sdf_net(eik_pts)
         grad = torch.autograd.grad(
-            outputs=sdf_all, inputs=flat_pts,
-            grad_outputs=torch.ones_like(sdf_all),
+            outputs=eik_sdf, inputs=eik_pts,
+            grad_outputs=torch.ones_like(eik_sdf),
             create_graph=True
         )[0]
         loss_eikonal = torch.mean((torch.norm(grad, dim=-1) - 1) ** 2)
