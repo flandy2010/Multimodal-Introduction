@@ -2,10 +2,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+import random
 
 
 class PositionalEncoding(nn.Module):
     """与 06 NeRF 相同的位置编码"""
+
     def __init__(self, L=10):
         super().__init__()
         self.L = L
@@ -19,74 +21,53 @@ class PositionalEncoding(nn.Module):
 
 
 class SDFNetwork(nn.Module):
-    """
-    SDF 网络：输入 3D 位置，输出 SDF 值 + 几何特征
-    架构参考 06 NeRF 的 pts_linears（8 层 + Skip Connection）
-    区别：激活函数用 Softplus（保证 SDF 平滑）；几何初始化为球体
-    """
-    def __init__(self, D=8, W=256, L_pos=6, init_radius=4.0):
+    def __init__(self, D=8, W=256, L_pos=6, init_radius=0.5):
         super().__init__()
+        # 注意：如果你做了单位球归一化，init_radius 设为 0.5 最合适
         self.L_pos = L_pos
         self.pos_enc = PositionalEncoding(L_pos)
-
         in_dim = 3 + 3 * 2 * L_pos
 
-        # 几何主干（与 NeRF 的 pts_linears 结构对齐）
-        self.pts_linears = nn.ModuleList([nn.Linear(in_dim, W)])
-        for i in range(D - 1):
-            if i == 4:  # 第 5 层 Skip Connection
-                self.pts_linears.append(nn.Linear(W + in_dim, W))
+        def make_layer(in_f, out_f, is_sdf_head=False):
+            layer = nn.Linear(in_f, out_f)
+            if is_sdf_head:
+                # --- 关键修改 1：最后一层权重均值设为 0，标准差极小 ---
+                # 这样初始输出就完全由 bias 控制
+                nn.init.normal_(layer.weight, mean=0.0, std=1e-5)
+                nn.init.constant_(layer.bias, -init_radius)
             else:
-                self.pts_linears.append(nn.Linear(W, W))
+                # --- 关键修改 2：隐藏层使用更小的初始化，降低正偏置累积 ---
+                nn.init.normal_(layer.weight, 0.0, np.sqrt(2) / np.sqrt(out_f))
+                # 初始 bias 稍微给一点点负值，抵消 Softplus 的正偏置
+                nn.init.constant_(layer.bias, -0.01)
 
-        # SDF 输出头（1 维 SDF 值）
-        self.sdf_linear = nn.Linear(W, 1)
+            return nn.utils.weight_norm(layer)
 
-        # 几何特征输出（供颜色网络使用，与 NeRF 的 feature_linear 对应）
+        # 几何主干
+        layers = []
+        layers.append(make_layer(in_dim, W))
+        for i in range(D - 1):
+            if i == 4:
+                layers.append(make_layer(W + in_dim, W))
+            else:
+                layers.append(make_layer(W, W))
+        self.pts_linears = nn.ModuleList(layers)
+
+        # 确保只定义一次，且使用 weight_norm
+        self.sdf_linear = make_layer(W, 1, is_sdf_head=True)
         self.feature_linear = nn.Linear(W, W)
 
-        # --- 几何初始化：让初始输出近似球体 SDF ---
-        self._geometric_init(init_radius)
-
-    def _geometric_init(self, radius):
-        """
-        几何初始化为近似球体 SDF（IDR/NeuS 标准做法）
-
-        策略：让 sdf_linear 的权重非常小 → 初始输出 ≈ bias = -radius（常数）
-        然后由 Eikonal Loss 逐步把网络推向真正的 ||x|| - radius 形态。
-        这比试图通过特殊初始化直接得到球体更稳定。
-        """
-        with torch.no_grad():
-            for i, layer in enumerate(self.pts_linears):
-                nn.init.constant_(layer.bias, 0.0)
-                nn.init.kaiming_normal_(layer.weight, nonlinearity='relu')
-
-            # SDF 输出层：极小权重 + bias=-radius
-            # 初始 SDF ≈ -radius 对所有点（全在内部）
-            # Eikonal Loss 会驱动其快速学习空间结构
-            nn.init.normal_(self.sdf_linear.weight, 0.0, 0.0001)
-            nn.init.constant_(self.sdf_linear.bias, -radius)
-
-            # 特征层
-            nn.init.constant_(self.feature_linear.bias, 0.0)
-            nn.init.kaiming_normal_(self.feature_linear.weight, nonlinearity='relu')
-
     def forward(self, x):
-        """
-        输入: x [N, 3]
-        输出: sdf [N, 1], features [N, W]
-        """
         x_embed = self.pos_enc(x)
-
         h = x_embed
         for i, l in enumerate(self.pts_linears):
-            if i == 5:  # Skip Connection（对应 D-1 中 i==4 的那层之后）
+            if i == 5:
                 h = torch.cat([x_embed, h], dim=-1)
-            h = F.softplus(l(h), beta=100)
+            # beta = 20 是对的
+            h = F.softplus(l(h), beta=20)
 
         sdf = self.sdf_linear(h)
         features = self.feature_linear(h)
-
         return sdf, features
 
 
@@ -95,6 +76,7 @@ class ColorNetwork(nn.Module):
     颜色网络：输入 (3D 位置, 视角方向, 几何特征) → RGB
     与 06 NeRF 的外观部分对应，但额外输入几何特征
     """
+
     def __init__(self, d_feature=256, L_dir=4):
         super().__init__()
         self.dir_enc = PositionalEncoding(L_dir)
@@ -125,6 +107,7 @@ class LearnableVariance(nn.Module):
     s = exp(log_s)，用 exp 保证 s > 0
     初始值通常设为 ln(init_val)，如 init_val=3 → log_s=ln(3)≈1.1
     """
+
     def __init__(self, init_val=3.0):
         super().__init__()
         # 存储 log(s)，用 exp 取出 s，保证 s > 0
@@ -139,7 +122,6 @@ class LearnableVariance(nn.Module):
 
 
 if __name__ == '__main__':
-
     sdf_net = SDFNetwork()
     color_net = ColorNetwork()
     variance = LearnableVariance(init_val=3.0)

@@ -55,6 +55,7 @@ def render_rays_sdf(sdf_net, color_net, rays_o, rays_d, near, far, n_samples, s_
 
     sdf_all = torch.cat(sdf_list, 0)   # [H*W*n_samples, 1]
     rgb_all = torch.cat(rgb_list, 0)    # [H*W*n_samples, 3]
+    print(f"Range of SDF is [{sdf_all.min().item():.3f}, {sdf_all.max().item():.3f}]")
 
     # --- Eikonal Loss ---
     # 混合策略：50% 表面附近点（从射线采样点里抽） + 50% 全局随机点
@@ -211,7 +212,7 @@ def train(args):
         optimizer.zero_grad()
         loss.backward()
         # 梯度裁剪（宽松值，只防数值爆炸，不阻碍 Eikonal 收敛）
-        torch.nn.utils.clip_grad_norm_(sdf_net.parameters(), max_norm=10.0)
+        torch.nn.utils.clip_grad_norm_(sdf_net.parameters(), max_norm=1.0)
         optimizer.step()
 
         last_eikonal = loss_eikonal.item()
@@ -219,6 +220,7 @@ def train(args):
         s_val_now = s_curr.item() if isinstance(s_curr, torch.Tensor) else s_curr
 
         pbar.set_postfix({
+            "Loss": f"{loss.item():.4f} / {loss_color.item():.4f} / {loss_eikonal.item():.4f}",
             "LR": f"{lr:.2e}",
             "PSNR": f"{psnr_val.item():.2f}",
             "Eik": f"{last_eikonal:.4f}",
@@ -243,7 +245,7 @@ def main():
     parser.add_argument("--data_path", type=str, default="../data/tiny_nerf_data.npz")
     parser.add_argument("--exp_dir", type=str, default="./runs/sdf_default")
     parser.add_argument("--n_iters", type=int, default=10000)
-    parser.add_argument("--lr", type=float, default=5e-4)
+    parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--n_samples", type=int, default=64)
     parser.add_argument("--near", type=float, default=0.0)
     parser.add_argument("--far", type=float, default=2.2)

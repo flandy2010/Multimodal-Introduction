@@ -27,8 +27,7 @@ class TinySDFDataset(Dataset):
         cam_centers = poses[:, :3, 3]  # (106, 3)
         # 计算相机群的中心，作为世界坐标系原点
         self.center = np.mean(cam_centers, axis=0)
-        # 计算相机到中心的平均距离，并将其缩放到约 1.0 左右
-        # 这样物体就被自然地包裹在 [-1, 1] 的球体内
+        # 计算相机到中心的最远距离，并将其缩放到约 1.0 左右，这样物体就被自然地包裹在 [-1, 1] 的球体内
         self.scale = 1.0 / np.linalg.norm(cam_centers - self.center, axis=1).max()
 
         # 记录归一化参数，用于后续推理渲染
