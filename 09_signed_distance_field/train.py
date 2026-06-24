@@ -9,47 +9,6 @@ from dataloader import TinySDFDataset
 from logger import SDFLogger
 
 
-def neus_sdf_to_alpha(sdf, s_val):
-    """
-    SDF 转 Alpha (NeuS 无偏离散版本)
-    输入 sdf: [H, W, n_samples]
-    """
-    # 1. 计算所有采样点的 CDF (Cumulative Distribution Function)
-    # 在 NeuS 中，Phi(x) = sigmoid(s * x)
-    # 当点在外面 (SDF > 0)，Phi 趋近于 1
-    # 当点在里面 (SDF < 0)，Phi 趋近于 0
-    phi = torch.sigmoid(sdf * s_val)
-
-    # 2. 提取相邻的 CDF 对
-    # 假设光线方向上，点 i 是 prev，点 i+1 是 next
-    phi_i = phi[..., :-1]      # [H, W, n_samples-1]
-    phi_i_plus_1 = phi[..., 1:]  # [H, W, n_samples-1]
-
-    # 3. 计算 Alpha
-    # 公式：alpha = max(0, (Phi_i - Phi_i+1) / Phi_i)
-    # 这个公式的逻辑是：如果 Phi 在下降，说明进入了物体，alpha 应该变大
-    alpha = (phi_i - phi_i_plus_1) / (phi_i + 1e-10)
-    alpha = torch.clamp(alpha, min=0.0, max=1.0)
-
-    # 4. 补齐最后一帧
-    # 因为 n 个采样点只能产生 n-1 个 alpha 区间，我们需要补齐最后一点
-    # 否则你的渲染结果会少一层。
-    last_alpha = torch.zeros_like(alpha[..., :1])
-    alpha = torch.cat([alpha, last_alpha], dim=-1)
-
-    return alpha
-
-
-def get_rays(H, W, focal, c2w):
-    """与 06 NeRF 相同的射线生成"""
-    i, j = torch.meshgrid(torch.linspace(0, W - 1, W), torch.linspace(0, H - 1, H), indexing='ij')
-    i, j = i.t(), j.t()
-    dirs = torch.stack([(i - W * .5) / focal, -(j - H * .5) / focal, -torch.ones_like(i)], -1).to(c2w.device)
-    rays_d = torch.sum(dirs[..., None, :] * c2w[:3, :3], -1)
-    rays_o = c2w[:3, 3].expand(rays_d.shape)
-    return rays_o, rays_d
-
-
 def render_rays_sdf(sdf_net, color_net, rays_o, rays_d, near, far, n_samples, s_val,
                     use_random_sample=False, compute_eikonal=True):
     """
@@ -164,14 +123,14 @@ def evaluate(args, sdf_net, color_net, test_dataset, device, step, logger, lr, l
     sdf_net.eval()
     color_net.eval()
 
-    target_img, target_pose = test_dataset[0]
-    target_img, target_pose = target_img.to(device), target_pose.to(device)
-    H, W, focal = test_dataset.H, test_dataset.W, test_dataset.focal
+    train_item = test_dataset[0]
+    target_img = train_item["image"].to(device)
+    rays_o = train_item["rays_o"].to(device)
+    rays_d = train_item["rays_d"].to(device)
 
     # 使用当前训练的 s 值（而非最终目标 s_val），保证 evaluate 和 train 一致
     eval_s = s_curr if s_curr is not None else args.s_val
 
-    rays_o, rays_d = get_rays(H, W, focal, target_pose)
     rgb_pred, _ = render_rays_sdf(
         sdf_net, color_net, rays_o, rays_d,
         near=args.near, far=args.far, n_samples=args.n_samples, s_val=eval_s,
@@ -198,7 +157,6 @@ def train(args):
     # 数据（与 06 NeRF 相同的 train/test 分离）
     train_dataset = TinySDFDataset(args.data_path, mode='train')
     test_dataset = TinySDFDataset(args.data_path, mode='test')
-    H, W, focal = train_dataset.H, train_dataset.W, train_dataset.focal
 
     # 模型
     sdf_net = SDFNetwork(init_radius=args.init_radius).to(device)
@@ -234,10 +192,10 @@ def train(args):
         s_curr = variance.s  # 可学习的 s，不再手动退火
 
         idx = np.random.randint(len(train_dataset))
-        target_img, target_pose = train_dataset[idx]
-        target_img, target_pose = target_img.to(device), target_pose.to(device)
-
-        rays_o, rays_d = get_rays(H, W, focal, target_pose)
+        train_item = train_dataset[idx]
+        target_img = train_item["image"].to(device)
+        rays_o = train_item["rays_o"].to(device)
+        rays_d = train_item["rays_d"].to(device)
 
         rgb_pred, loss_eikonal = render_rays_sdf(
             sdf_net, color_net, rays_o, rays_d,
@@ -287,8 +245,8 @@ def main():
     parser.add_argument("--n_iters", type=int, default=10000)
     parser.add_argument("--lr", type=float, default=5e-4)
     parser.add_argument("--n_samples", type=int, default=64)
-    parser.add_argument("--near", type=float, default=2.0)
-    parser.add_argument("--far", type=float, default=6.0)
+    parser.add_argument("--near", type=float, default=0.0)
+    parser.add_argument("--far", type=float, default=2.2)
     parser.add_argument("--init_radius", type=float, default=4.0, help="初始球体 SDF 半径")
     parser.add_argument("--s_val", type=float, default=50.0, help="SDF→alpha 的 s 参数（最终值）")
     parser.add_argument("--s_val_init", type=float, default=5.0, help="SDF→alpha 的 s 参数（初始值）")

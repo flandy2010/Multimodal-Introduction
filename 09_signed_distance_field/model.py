@@ -139,6 +139,7 @@ class LearnableVariance(nn.Module):
 
 
 if __name__ == '__main__':
+
     sdf_net = SDFNetwork()
     color_net = ColorNetwork()
     variance = LearnableVariance(init_val=3.0)
