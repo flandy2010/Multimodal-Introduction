@@ -49,19 +49,27 @@ class SDFNetwork(nn.Module):
         self._geometric_init(init_radius)
 
     def _geometric_init(self, radius):
-        """初始化为球体 SDF（NeuS/VolSDF 标准做法）"""
+        """
+        几何初始化为近似球体 SDF（IDR/NeuS 标准做法）
+
+        策略：让 sdf_linear 的权重非常小 → 初始输出 ≈ bias = -radius（常数）
+        然后由 Eikonal Loss 逐步把网络推向真正的 ||x|| - radius 形态。
+        这比试图通过特殊初始化直接得到球体更稳定。
+        """
         with torch.no_grad():
             for i, layer in enumerate(self.pts_linears):
                 nn.init.constant_(layer.bias, 0.0)
-                nn.init.normal_(layer.weight, 0.0, np.sqrt(2) / np.sqrt(layer.weight.shape[0]))
+                nn.init.kaiming_normal_(layer.weight, nonlinearity='relu')
 
-            # SDF 输出层特殊初始化
-            nn.init.normal_(self.sdf_linear.weight, mean=np.sqrt(np.pi) / np.sqrt(self.sdf_linear.weight.shape[1]), std=0.0001)
+            # SDF 输出层：极小权重 + bias=-radius
+            # 初始 SDF ≈ -radius 对所有点（全在内部）
+            # Eikonal Loss 会驱动其快速学习空间结构
+            nn.init.normal_(self.sdf_linear.weight, 0.0, 0.0001)
             nn.init.constant_(self.sdf_linear.bias, -radius)
 
-            # 特征层正常初始化
+            # 特征层
             nn.init.constant_(self.feature_linear.bias, 0.0)
-            nn.init.normal_(self.feature_linear.weight, 0.0, np.sqrt(2) / np.sqrt(self.feature_linear.weight.shape[0]))
+            nn.init.kaiming_normal_(self.feature_linear.weight, nonlinearity='relu')
 
     def forward(self, x):
         """

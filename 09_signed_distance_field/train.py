@@ -95,10 +95,20 @@ def render_rays_sdf(sdf_net, color_net, rays_o, rays_d, near, far, n_samples, s_
     sdf_all = torch.cat(sdf_list, 0)   # [H*W*n_samples, 1]
     rgb_all = torch.cat(rgb_list, 0)    # [H*W*n_samples, 3]
 
-    # --- Eikonal Loss（随机采样少量点，避免对全部 128 万点求二阶梯度）---
+    # --- Eikonal Loss ---
+    # 混合策略：50% 表面附近点（从射线采样点里抽） + 50% 全局随机点
+    # 这样既约束表面处梯度为 1，又约束远离表面的空间
     if compute_eikonal:
-        n_eik = 5000  # 只采 5000 个点算 Eikonal，足够提供正则信号
-        eik_pts = torch.empty(n_eik, 3, device=rays_o.device).uniform_(-1.5, 1.5)
+        n_eik = 5000
+        # 一半来自射线上的采样点（表面附近质量更高）
+        n_surface = n_eik // 2
+        perm = torch.randperm(flat_pts.shape[0], device=rays_o.device)[:n_surface]
+        surface_pts = flat_pts[perm].detach().clone()
+        # 一半随机空间点
+        n_random = n_eik - n_surface
+        random_pts = torch.empty(n_random, 3, device=rays_o.device).uniform_(-1.5, 1.5)
+        # 合并
+        eik_pts = torch.cat([surface_pts, random_pts], dim=0)
         eik_pts.requires_grad_(True)
         eik_sdf, _ = sdf_net(eik_pts)
         grad = torch.autograd.grad(
