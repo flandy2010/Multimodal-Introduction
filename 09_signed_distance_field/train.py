@@ -54,13 +54,13 @@ def render_rays_sdf(sdf_net, color_net, rays_o, rays_d, near, far, n_samples, s_
         with torch.enable_grad():
             sdf_i, feat_i = sdf_net(p)
 
-            # 2. 计算梯度（法线）
+            # # 2. 计算梯度（法线）
             grad_i = torch.autograd.grad(
                 outputs=sdf_i,
                 inputs=p,
                 grad_outputs=torch.ones_like(sdf_i),
                 create_graph=False,  # 不保留二阶图，节省显存
-                retain_graph=False,
+                retain_graph=True,
                 only_inputs=True
             )[0]
             normals_i = F.normalize(grad_i, p=2, dim=-1)
@@ -194,9 +194,9 @@ def train(args):
 
     # 优化器：s 参数用独立的较高学习率（NeuS 论文做法）
     optimizer = torch.optim.Adam([
-        {'params': sdf_net.parameters(), 'lr': args.lr},
-        {'params': color_net.parameters(), 'lr': args.lr},
-        {'params': variance.parameters(), 'lr': args.lr * 10.0},  # s 需要快速适应
+        {'params': sdf_net.parameters(), 'lr': args.lr, 'base': 1},
+        {'params': color_net.parameters(), 'lr': args.lr, 'base': 1},
+        {'params': variance.parameters(), 'lr': args.lr, 'base': 10},  # s 需要快速适应
     ])
 
     # Logger
@@ -207,7 +207,7 @@ def train(args):
         decay_rate = 0.01
         new_lr = args.lr * (decay_rate ** (step / args.n_iters))
         for pg in optimizer.param_groups:
-            pg['lr'] = new_lr
+            pg['lr'] = new_lr * pg['base']
         return new_lr
 
     last_eikonal = 0.0
