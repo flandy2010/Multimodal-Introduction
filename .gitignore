@@ -16,3 +16,4 @@ data/360_extra_scenes
 06_neural_radiance_fields/runs/
 07_instant_neural_graphics_primitives/runs
 08_3d_gaussian_splatting/runs
+09_signed_distance_field/runs

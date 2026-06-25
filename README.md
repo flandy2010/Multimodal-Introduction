@@ -1,5 +1,33 @@
 # Multimodal-Introduction
 
+本仓库用于多模态模型的入门，模型和数据集都尽可能用Nano版本（除非真的拟合不了）。主要涉及内容为：
+- 图像生成：生成范式涉及扩散模型、Flow Match Model，模型结构涉及UNet，Vision Transformer
+- 3D生成：生成范式涉及NeRF、Instant-NGP、3DGS、SDF
+
+# 通用数据集
+- MINST手写数字：主要用于可控图片生成，同时也加入了部分变换内容后用于训练可控视频生成。
+- tiny_nerf_data：用于训练NeRF、Instant-NGP、SDF
+- 360_extra_scenes：用于训练3DGS
+
+```shell
+mkdir data && cd data
+
+# 下载MINST手写数字数据集
+cd 01_diffusion_model
+python download_dataset.py
+
+# 下载tiny_nerf_data
+wget http://cseweb.ucsd.edu/~viscomp/projects/LF/papers/ECCV20/nerf/tiny_nerf_data.npz
+
+# 下载360_extra_scenes
+mkdir 360_extra_scenes
+cd 360_extra_scenes
+wget https://storage.googleapis.com/gresearch/refraw360/360_extra_scenes.zip
+unzip 360_extra_scenes.zip
+```
+
+# 图像生成实验结果
+
 ### [2026-06-13] 扩散模型（Nano版）
 
 - 实现记录：[Nano-DDPM](https://github.com/flandy2010/Multimodal-Introduction/blob/main/01_diffusion_model/README.md)
@@ -45,6 +73,8 @@
 ![result](05_video_generation/examples/record_demo_02/ret_将1垂直翻转.gif)
 ![result](05_video_generation/examples/record_demo_02/ret_将7缩小2倍.gif)
 ![result](05_video_generation/examples/record_demo_02/ret_将4旋转120度.gif)
+
+# 3D生成实验结果
 
 ### [TODO] Neural Radiance Fields
 步入3D建模内容，先练习一下经典的神经辐射场（Neural Radiance Fields）。
