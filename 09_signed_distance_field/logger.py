@@ -3,6 +3,7 @@ import json
 import torch
 import numpy as np
 import matplotlib
+
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from skimage.metrics import structural_similarity as ssim_func
@@ -112,22 +113,45 @@ class SDFLogger:
 
     @torch.no_grad()
     def visualize_sdf_slice(self, step, sdf_net, device):
-        """绘制 Z=0 处的 SDF 切面图"""
+        """绘制三个坐标轴平面的 SDF 切面图（XY, XZ, YZ）"""
         res = 128
         grid = torch.linspace(-1.5, 1.5, res)
         x, y = torch.meshgrid(grid, grid, indexing='ij')
-        pts = torch.stack([x, y, torch.zeros_like(x)], dim=-1).to(device).reshape(-1, 3)
-        sdf, _ = sdf_net(pts)
-        sdf = sdf.reshape(res, res).cpu().numpy()
 
-        fig, ax = plt.subplots(figsize=(6, 6))
-        im = ax.imshow(sdf, cmap='seismic', origin='lower',
-                       extent=[-1.5, 1.5, -1.5, 1.5])
-        ax.contour(np.linspace(-1.5, 1.5, res), np.linspace(-1.5, 1.5, res),
-                   sdf, levels=[0], colors='black', linewidths=2)
-        ax.set_title(f"SDF Slice (Z=0) Step {step}")
-        plt.colorbar(im, ax=ax)
-        plt.savefig(os.path.join(self.vis_dir, f"sdf_{step:05d}.png"), bbox_inches='tight', dpi=100)
+        # ---- 1. XY平面 (Z=0) ----
+        pts_xy = torch.stack([x, y, torch.zeros_like(x)], dim=-1).to(device).reshape(-1, 3)
+        sdf_xy, _ = sdf_net(pts_xy)
+        sdf_xy = sdf_xy.reshape(res, res).cpu().numpy()
+
+        # ---- 2. XZ平面 (Y=0) ----
+        pts_xz = torch.stack([x, torch.zeros_like(x), y], dim=-1).to(device).reshape(-1, 3)
+        sdf_xz, _ = sdf_net(pts_xz)
+        sdf_xz = sdf_xz.reshape(res, res).cpu().numpy()
+
+        # ---- 3. YZ平面 (X=0) ----
+        pts_yz = torch.stack([torch.zeros_like(x), x, y], dim=-1).to(device).reshape(-1, 3)
+        sdf_yz, _ = sdf_net(pts_yz)
+        sdf_yz = sdf_yz.reshape(res, res).cpu().numpy()
+
+        # ---- 绘图 ----
+        fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+        titles = ['XY (Z=0)', 'XZ (Y=0)', 'YZ (X=0)']
+        data = [sdf_xy, sdf_xz, sdf_yz]
+
+        for ax, dat, title in zip(axes, data, titles):
+            im = ax.imshow(dat, cmap='seismic', origin='lower',
+                           extent=[-1.5, 1.5, -1.5, 1.5])
+            # 绘制零等值线（黑色实线）
+            ax.contour(np.linspace(-1.5, 1.5, res), np.linspace(-1.5, 1.5, res),
+                       dat, levels=[0], colors='black', linewidths=2)
+            ax.set_title(f"{title}  Step {step}")
+            ax.set_xlabel('X' if 'X' in title else 'Y' if 'Y' in title else 'Z')
+            ax.set_ylabel('Y' if 'Y' in title else 'Z' if 'Z' in title else 'X')
+            plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+
+        plt.tight_layout()
+        save_path = os.path.join(self.vis_dir, f"sdf_slices_{step:05d}.png")
+        plt.savefig(save_path, bbox_inches='tight', dpi=100)
         plt.close(fig)
 
     def evaluate_and_log(self, step, pred, gt, lr, loss_eikonal=0.0, s_val=None, sdf_net=None, device=None):
