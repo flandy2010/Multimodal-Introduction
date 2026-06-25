@@ -135,6 +135,7 @@ class LearnableVariance(nn.Module):
 
 
 if __name__ == '__main__':
+
     sdf_net = SDFNetwork()
     color_net = ColorNetwork()
     variance = LearnableVariance(init_val=3.0)
@@ -142,9 +143,11 @@ if __name__ == '__main__':
     pts = torch.randn(100, 3)
     dirs = torch.randn(100, 3)
     dirs = dirs / dirs.norm(dim=-1, keepdim=True)
+    normals = torch.randn(100, 3)
+    normals = normals / normals.norm(dim=-1, keepdim=True)
 
     sdf, feats = sdf_net(pts)
-    rgb = color_net(pts, dirs, feats)
+    rgb = color_net(pts, dirs, feats, normals)
     s = variance()
     print(f"SDF shape: {sdf.shape}, s = {s.item():.4f}")
     print(f"SDF shape: {sdf.shape}, range: [{sdf.min():.3f}, {sdf.max():.3f}]")
