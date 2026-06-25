@@ -12,12 +12,16 @@ from strategy import GaussianStrategy
 
 
 def train(args):
+
     # 1. 环境准备
     if args.device != "auto":
         device = torch.device(args.device)
+    elif torch.backends.mps.is_available():
+        device = torch.device("mps")
+    elif torch.cuda.is_available():
+        device = torch.device("cuda")
     else:
-        device = torch.device(
-            "mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu")
+        device = torch.device("cpu")
     print(f"3DGS Training | device: {device}")
 
     # 2. 数据准备

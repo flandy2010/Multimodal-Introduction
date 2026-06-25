@@ -32,6 +32,7 @@ class GSDataLoader:
         print(f"✅ 对齐完成 | 分辨率: {self.W}x{self.H} | 点数: {len(self.initial_points)}")
 
     def load_intrinsics(self):
+
         with open(self.sparse_path / "cameras.bin", "rb") as f:
             num_cameras = struct.unpack("<Q", f.read(8))[0]
             cam_id, model_id, width, height = struct.unpack("<IiQQ", f.read(24))
@@ -40,10 +41,17 @@ class GSDataLoader:
             params = struct.unpack(f"<{n_p}d", f.read(n_p * 8))
             self.focal = float(params[0] / self.factor)
             self.W, self.H = int(width / self.factor), int(height / self.factor)
-            self.K = torch.tensor([[self.focal, 0, self.W / 2], [0, self.focal, self.H / 2], [0, 0, 1]],
-                                  dtype=torch.float32)
+
+            # K矩阵的含义是：将3D点(x, y, z)透视到z=1后得到(x/z, y/z, 1)，然后按焦距和宽高进行缩放和平移
+            # 最终实现：从归一化相机平面到像素平面的仿射变换
+            self.K = torch.tensor([
+                [self.focal, 0, self.W / 2],
+                [0, self.focal, self.H / 2],
+                [0, 0, 1]
+            ], dtype=torch.float32)
 
     def load_extrinsics(self):
+
         poses, img_names = [], []
         with open(self.sparse_path / "images.bin", "rb") as f:
             num_images = struct.unpack("<Q", f.read(8))[0]
@@ -51,6 +59,8 @@ class GSDataLoader:
                 # image_id(I), q(4d), t(3d), cam_id(I) -> 4 + 32 + 24 + 4 = 64 字节
                 data = struct.unpack("<IdddddddI", f.read(64))
                 qvec, tvec = np.array(data[1:5]), np.array(data[5:8])
+                # qvec：四元数（旋转）
+                # tvec：世界坐标系到相机坐标系（平移）
 
                 # 读取 null-terminated 文件名
                 name = ""
@@ -65,6 +75,7 @@ class GSDataLoader:
                 f.read(num_points2d * 24)
 
                 # W2C -> C2W (保持 COLMAP 坐标系: X右 Y下 Z前)
+                # Camera-to-World矩阵，就是一台相机在世界坐标系中的“位置”和“朝向”。它将相机坐标系下的点，映射回世界坐标系中。
                 R = qvec2rotmat(qvec)
                 R_c2w = R.T
                 T_c2w = -R_c2w @ tvec
@@ -73,12 +84,14 @@ class GSDataLoader:
 
         self.img_names = img_names
         poses = np.array(poses)
-        # 中心化
+        # 中心化（下标为3的第4维存放了平移量）
         self.avg_center = np.mean(poses[:, :3, 3], axis=0)
         poses[:, :3, 3] -= self.avg_center
         # 缩放
         self.scene_scale = 1.0 / (np.max(np.abs(poses[:, :3, 3])) + 1e-5)
         poses[:, :3, 3] *= self.scene_scale
+
+        # 最终所有相机都被约束在了3轴[-1, 1]的立方体里面
         self.poses = torch.from_numpy(poses).float()
 
     def load_points3d(self):
@@ -94,14 +107,14 @@ class GSDataLoader:
                 f.read(struct.unpack("<Q", f.read(8))[0] * 8)  # skip track
 
         xyzs = np.array(xyzs)
-        # 不翻转，保持 COLMAP 坐标系
+        # 不翻转，保持 COLMAP 坐标系，但需要和相机进行相同的缩放
         xyzs -= self.avg_center
         xyzs *= self.scene_scale
 
         xyzs = torch.from_numpy(xyzs).float()
         rgbs = torch.from_numpy(np.array(rgbs)).float() / 255.0
 
-        # 过滤离群点：只保留在相机球体附近的点（半径基于相机分布）
+        # 过滤离群点：只保留在相机球体附近的点（半径基于相机分布），避免colmap导致的飞点
         # 相机归一化后 max abs = 1.0，保留 radius 倍范围内的点
         radius = 3.0
         point_norms = torch.norm(xyzs, dim=-1)
@@ -138,3 +151,11 @@ class GSDataLoader:
     def get_normalization_params(self):
         # radius 应与点云过滤半径一致
         return {"radius": 3.0}
+
+
+if __name__ == "__main__":
+
+    loader = GSDataLoader(
+        data_path="../data/360_extra_scenes/flowers",
+        factor=8
+    )
