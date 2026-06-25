@@ -23,27 +23,24 @@ class PositionalEncoding(nn.Module):
 class SDFNetwork(nn.Module):
     def __init__(self, D=8, W=256, L_pos=6, init_radius=0.5):
         super().__init__()
-        # 注意：如果你做了单位球归一化，init_radius 设为 0.5 最合适
         self.L_pos = L_pos
+        self.init_radius = init_radius          # 保存下来，forward 要用
         self.pos_enc = PositionalEncoding(L_pos)
         in_dim = 3 + 3 * 2 * L_pos
 
         def make_layer(in_f, out_f, is_sdf_head=False):
             layer = nn.Linear(in_f, out_f)
             if is_sdf_head:
-                # --- 关键修改 1：最后一层权重均值设为 0，标准差极小 ---
-                # 这样初始输出就完全由 bias 控制
+                # ---- 修改点：让网络初始输出接近 0，不喧宾夺主 ----
+                # 权重用极小标准差，偏置设为 0，这样 self.sdf_linear(h) ≈ 0
                 nn.init.normal_(layer.weight, mean=0.0, std=1e-5)
-                nn.init.constant_(layer.bias, -init_radius)
+                nn.init.constant_(layer.bias, 0.0)
             else:
-                # --- 关键修改 2：隐藏层使用更小的初始化，降低正偏置累积 ---
                 nn.init.normal_(layer.weight, 0.0, np.sqrt(2) / np.sqrt(out_f))
-                # 初始 bias 稍微给一点点负值，抵消 Softplus 的正偏置
                 nn.init.constant_(layer.bias, -0.01)
-
             return nn.utils.weight_norm(layer)
 
-        # 几何主干
+        # 几何主干（不变）
         layers = []
         layers.append(make_layer(in_dim, W))
         for i in range(D - 1):
@@ -53,20 +50,32 @@ class SDFNetwork(nn.Module):
                 layers.append(make_layer(W, W))
         self.pts_linears = nn.ModuleList(layers)
 
-        # 确保只定义一次，且使用 weight_norm
-        self.sdf_linear = make_layer(W, 1, is_sdf_head=True)
+        # 输出头：sdf 和 feature
+        self.sdf_linear = nn.Linear(W, 1)   # 不使用 weight_norm
+        nn.init.constant_(self.sdf_linear.weight, 0.0)
+        nn.init.constant_(self.sdf_linear.bias, 0.0)
+
         self.feature_linear = nn.Linear(W, W)
+        # feature 的初始化可以保持原样，或简单的 xavier
+        nn.init.xavier_uniform_(self.feature_linear.weight)
+        nn.init.constant_(self.feature_linear.bias, 0.0)
 
     def forward(self, x):
+
         x_embed = self.pos_enc(x)
         h = x_embed
         for i, l in enumerate(self.pts_linears):
             if i == 5:
                 h = torch.cat([x_embed, h], dim=-1)
-            # beta = 20 是对的
             h = F.softplus(l(h), beta=20)
 
-        sdf = self.sdf_linear(h)
+        # 原始网络输出（初始≈0）
+        sdf_raw = self.sdf_linear(h)
+
+        # ---- 关键：加上球体距离先验 ----
+        # ||x|| - init_radius，保持维度一致
+        sdf = sdf_raw + torch.norm(x, dim=-1, keepdim=True) - self.init_radius
+
         features = self.feature_linear(h)
         return sdf, features
 

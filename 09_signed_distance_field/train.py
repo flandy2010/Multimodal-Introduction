@@ -53,9 +53,8 @@ def render_rays_sdf(sdf_net, color_net, rays_o, rays_d, near, far, n_samples, s_
         sdf_list.append(sdf_i)
         rgb_list.append(rgb_i)
 
-    sdf_all = torch.cat(sdf_list, 0)   # [H*W*n_samples, 1]
-    rgb_all = torch.cat(rgb_list, 0)    # [H*W*n_samples, 3]
-    print(f"Range of SDF is [{sdf_all.min().item():.3f}, {sdf_all.max().item():.3f}]")
+    sdf_all = torch.cat(sdf_list, 0)  # [H*W*n_samples, 1]
+    rgb_all = torch.cat(rgb_list, 0)  # [H*W*n_samples, 3]
 
     # --- Eikonal Loss ---
     # 混合策略：50% 表面附近点（从射线采样点里抽） + 50% 全局随机点
@@ -65,7 +64,7 @@ def render_rays_sdf(sdf_net, color_net, rays_o, rays_d, near, far, n_samples, s_
         # 一半来自射线上的采样点（表面附近质量更高）
         n_surface = n_eik // 2
         perm = torch.randperm(flat_pts.shape[0], device=rays_o.device)[:n_surface]
-        surface_pts = flat_pts[perm].detach().clone()
+        surface_pts = flat_pts[perm]
         # 一半随机空间点（覆盖射线有效范围，而非只在原点附近）
         n_random = n_eik - n_surface
         # 根据 flat_pts 的实际范围动态决定采样范围
@@ -87,8 +86,8 @@ def render_rays_sdf(sdf_net, color_net, rays_o, rays_d, near, far, n_samples, s_
         loss_eikonal = torch.tensor(0.0, device=rays_o.device)
 
     # Reshape
-    sdf_r = sdf_all.reshape(H_img, W_img, n_samples)       # [H, W, S]
-    rgb_r = rgb_all.reshape(H_img, W_img, n_samples, 3)     # [H, W, S, 3]
+    sdf_r = sdf_all.reshape(H_img, W_img, n_samples)  # [H, W, S]
+    rgb_r = rgb_all.reshape(H_img, W_img, n_samples, 3)  # [H, W, S, 3]
 
     # 计算alpha
     def get_alpha_volsdf(sdf, s_val, dists):
@@ -103,7 +102,7 @@ def render_rays_sdf(sdf_net, color_net, rays_o, rays_d, near, far, n_samples, s_
         return torch.cat([alpha, torch.zeros_like(alpha[..., :1])], dim=-1)
 
     dists = torch.cat([z_vals[..., 1:] - z_vals[..., :-1], torch.full_like(z_vals[..., :1], 1e-2)], -1)
-    alpha = get_alpha_volsdf(sdf_r, s_val, dists)   # 推荐用于训练初期快速出形状
+    alpha = get_alpha_volsdf(sdf_r, s_val, dists)  # 推荐用于训练初期快速出形状
     # alpha = get_alpha_neus(sdf_r, s_val)            # 推荐用于精细模型导出
 
     # 正确的 Transmittance 公式（与 06 NeRF 一致）
@@ -116,7 +115,14 @@ def render_rays_sdf(sdf_net, color_net, rays_o, rays_d, near, far, n_samples, s_
     # 体渲染积分
     rgb_pred = torch.sum(weights[..., None] * rgb_r, dim=-2)
 
-    return rgb_pred, loss_eikonal
+    extra_info = {
+        "min_sdf": torch.min(sdf_all).item(),
+        "max_sdf": torch.max(sdf_all).item(),
+        "mean_alpha": torch.mean(alpha).item(),
+
+    }
+
+    return rgb_pred, loss_eikonal, extra_info
 
 
 @torch.no_grad()
@@ -132,7 +138,7 @@ def evaluate(args, sdf_net, color_net, test_dataset, device, step, logger, lr, l
     # 使用当前训练的 s 值（而非最终目标 s_val），保证 evaluate 和 train 一致
     eval_s = s_curr if s_curr is not None else args.s_val
 
-    rgb_pred, _ = render_rays_sdf(
+    rgb_pred, _, _ = render_rays_sdf(
         sdf_net, color_net, rays_o, rays_d,
         near=args.near, far=args.far, n_samples=args.n_samples, s_val=eval_s,
         compute_eikonal=False
@@ -198,7 +204,7 @@ def train(args):
         rays_o = train_item["rays_o"].to(device)
         rays_d = train_item["rays_d"].to(device)
 
-        rgb_pred, loss_eikonal = render_rays_sdf(
+        rgb_pred, loss_eikonal, extra_info = render_rays_sdf(
             sdf_net, color_net, rays_o, rays_d,
             near=args.near, far=args.far,
             n_samples=args.n_samples, s_val=s_curr,
@@ -220,11 +226,14 @@ def train(args):
         s_val_now = s_curr.item() if isinstance(s_curr, torch.Tensor) else s_curr
 
         pbar.set_postfix({
-            "Loss": f"{loss.item():.4f} / {loss_color.item():.4f} / {loss_eikonal.item():.4f}",
+            "Loss": f"{loss.item():.3f}",
+            "Lc": f"{loss_color.item():.3f}",
+            "Le": f"{loss_eikonal.item():.3f}",
             "LR": f"{lr:.2e}",
             "PSNR": f"{psnr_val.item():.2f}",
-            "Eik": f"{last_eikonal:.4f}",
             "s": f"{s_val_now:.2f}",
+            "d": f"[{extra_info['min_sdf']:.2f}, {extra_info['max_sdf']:.2f}]",
+            "alpha": f"{extra_info['mean_alpha']:.2f}"
         })
 
         if step % args.display_int == 0:
@@ -240,14 +249,13 @@ def train(args):
 
 
 def main():
-
     parser = argparse.ArgumentParser(description="SDF/NeuS Trainer")
     parser.add_argument("--data_path", type=str, default="../data/tiny_nerf_data.npz")
     parser.add_argument("--exp_dir", type=str, default="./runs/sdf_default")
     parser.add_argument("--n_iters", type=int, default=10000)
-    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--lr", type=float, default=5e-4)
     parser.add_argument("--n_samples", type=int, default=64)
-    parser.add_argument("--near", type=float, default=0.0)
+    parser.add_argument("--near", type=float, default=0.1)
     parser.add_argument("--far", type=float, default=2.2)
     parser.add_argument("--init_radius", type=float, default=0.5, help="初始球体 SDF 半径")
     parser.add_argument("--s_val", type=float, default=50.0, help="SDF→alpha 的 s 参数（最终值）")
