@@ -48,8 +48,26 @@ def render_rays_sdf(sdf_net, color_net, rays_o, rays_d, near, far, n_samples, s_
     for i in range(0, flat_pts.shape[0], chunk):
         p = flat_pts[i:i + chunk]
         d = flat_dirs[i:i + chunk]
-        sdf_i, feat_i = sdf_net(p)
-        rgb_i = color_net(p, d, feat_i)
+
+        # 1. 开启梯度追踪以计算法线
+        p.requires_grad_(True)
+        with torch.enable_grad():
+            sdf_i, feat_i = sdf_net(p)
+
+            # 2. 计算梯度（法线）
+            grad_i = torch.autograd.grad(
+                outputs=sdf_i,
+                inputs=p,
+                grad_outputs=torch.ones_like(sdf_i),
+                create_graph=False,  # 不保留二阶图，节省显存
+                retain_graph=False,
+                only_inputs=True
+            )[0]
+            normals_i = F.normalize(grad_i, p=2, dim=-1)
+
+        # 3. 法线传入 color_net（推荐 detach，避免颜色梯度影响几何）
+        rgb_i = color_net(p, d, feat_i, normals_i.detach())
+
         sdf_list.append(sdf_i)
         rgb_list.append(rgb_i)
 
@@ -115,11 +133,15 @@ def render_rays_sdf(sdf_net, color_net, rays_o, rays_d, near, far, n_samples, s_
     # 体渲染积分
     rgb_pred = torch.sum(weights[..., None] * rgb_r, dim=-2)
 
+    # 计算一些统计量
+    k = int(0.2 * alpha.numel())
+    top20_alpha, _ = torch.topk(alpha.view(-1), k)
+
     extra_info = {
         "min_sdf": torch.min(sdf_all).item(),
         "max_sdf": torch.max(sdf_all).item(),
         "mean_alpha": torch.mean(alpha).item(),
-
+        "top20_alpha": torch.mean(top20_alpha).item(),
     }
 
     return rgb_pred, loss_eikonal, extra_info
@@ -213,12 +235,19 @@ def train(args):
 
         # Loss
         loss_color = F.mse_loss(rgb_pred, target_img)
-        loss = loss_color + args.eikonal_weight * loss_eikonal
+        if step < 2000:
+            loss = loss_color + 0.0 * loss_eikonal
+        elif 2000 <= step < 3000:
+            rate = (step - 2000) / 1000
+            loss = loss_color + args.eikonal_weight * loss_eikonal * rate
+        else:
+            loss = loss_color + args.eikonal_weight * loss_eikonal
 
         optimizer.zero_grad()
         loss.backward()
         # 梯度裁剪（宽松值，只防数值爆炸，不阻碍 Eikonal 收敛）
         torch.nn.utils.clip_grad_norm_(sdf_net.parameters(), max_norm=1.0)
+
         optimizer.step()
 
         last_eikonal = loss_eikonal.item()
@@ -233,7 +262,7 @@ def train(args):
             "PSNR": f"{psnr_val.item():.2f}",
             "s": f"{s_val_now:.2f}",
             "d": f"[{extra_info['min_sdf']:.2f}, {extra_info['max_sdf']:.2f}]",
-            "alpha": f"{extra_info['mean_alpha']:.2f}"
+            "top20_alpha": f"{extra_info['top20_alpha']:.2f}"
         })
 
         if step % args.display_int == 0:

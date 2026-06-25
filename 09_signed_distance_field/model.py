@@ -21,7 +21,8 @@ class PositionalEncoding(nn.Module):
 
 
 class SDFNetwork(nn.Module):
-    def __init__(self, D=8, W=256, L_pos=6, init_radius=0.5):
+
+    def __init__(self, D=8, W=256, L_pos=10, init_radius=0.5):
         super().__init__()
         self.L_pos = L_pos
         self.init_radius = init_radius          # 保存下来，forward 要用
@@ -52,8 +53,8 @@ class SDFNetwork(nn.Module):
 
         # 输出头：sdf 和 feature
         self.sdf_linear = nn.Linear(W, 1)   # 不使用 weight_norm
-        nn.init.constant_(self.sdf_linear.weight, 0.0)
-        nn.init.constant_(self.sdf_linear.bias, 0.0)
+        nn.init.normal_(self.sdf_linear.weight, 0.0, std=1e-4)
+        nn.init.constant_(self.sdf_linear.bias, 1e-4)
 
         self.feature_linear = nn.Linear(W, W)
         # feature 的初始化可以保持原样，或简单的 xavier
@@ -82,17 +83,16 @@ class SDFNetwork(nn.Module):
 
 class ColorNetwork(nn.Module):
     """
-    颜色网络：输入 (3D 位置, 视角方向, 几何特征) → RGB
-    与 06 NeRF 的外观部分对应，但额外输入几何特征
+    颜色网络：输入 (3D 位置, 法线, 视角方向, 几何特征) → RGB
     """
-
     def __init__(self, d_feature=256, L_dir=4):
         super().__init__()
         self.dir_enc = PositionalEncoding(L_dir)
         in_dim_dir = 3 + 3 * 2 * L_dir
 
+        # 输入：位置(3) + 法线(3) + 方向编码(in_dim_dir) + 特征(d_feature)
         self.layers = nn.Sequential(
-            nn.Linear(3 + d_feature + in_dim_dir, 256),
+            nn.Linear(3 + 3 + in_dim_dir + d_feature, 256),
             nn.ReLU(),
             nn.Linear(256, 128),
             nn.ReLU(),
@@ -100,14 +100,18 @@ class ColorNetwork(nn.Module):
             nn.Sigmoid()
         )
 
-    def forward(self, pts, dirs, features):
+    def forward(self, pts, dirs, features, normals):
         """
         pts: [N, 3] 位置
         dirs: [N, 3] 归一化视角方向
         features: [N, W] 几何特征
+        normals: [N, 3] 表面法线（通常从 SDF 梯度归一化得到）
         """
         d_embed = self.dir_enc(dirs)
-        return self.layers(torch.cat([pts, d_embed, features], dim=-1))
+        # 为节省显存，法线可以 detach（如果不希望颜色损失影响几何）
+        # 如果你想保留法线的梯度，去掉 .detach()
+        normals = normals.detach()  # 可选，视需求决定
+        return self.layers(torch.cat([pts, normals, d_embed, features], dim=-1))
 
 
 class LearnableVariance(nn.Module):
