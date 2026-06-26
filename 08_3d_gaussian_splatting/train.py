@@ -25,7 +25,7 @@ def train(args):
     print(f"3DGS Training | device: {device}")
 
     # 2. 数据准备
-    loader = GSDataLoader(args.data_path, factor=args.factor)
+    loader = GSDataLoader(args.data_path, factor=args.factor, max_init_points=args.num_points)
     norm_params = loader.get_normalization_params()
     scene_radius = norm_params["radius"]
     initial_pcd = loader.get_initial_pcd()

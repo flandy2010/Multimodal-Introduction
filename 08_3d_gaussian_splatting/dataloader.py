@@ -15,10 +15,11 @@ def qvec2rotmat(q):
 
 
 class GSDataLoader:
-    def __init__(self, data_path, factor=8):
+    def __init__(self, data_path, factor=8, max_init_points=15000):
         self.path = Path(data_path)
         self.factor = factor
         self.sparse_path = self.path / "sparse" / "0"
+        self.max_init_points = max_init_points
 
         # 1. 加载相机内参
         self.load_intrinsics()
@@ -122,9 +123,9 @@ class GSDataLoader:
         xyzs = xyzs[inlier_mask]
         rgbs = rgbs[inlier_mask]
 
-        # 限制初始点数，flowers 这种场景通常有 5-10 万个点，渲染太慢
-        if len(xyzs) > 15000:
-            idx = torch.randperm(len(xyzs))[:15000]
+        # 限制初始点数，通过 max_init_points 参数控制（对应 train.py 的 --num_points）
+        if len(xyzs) > self.max_init_points:
+            idx = torch.randperm(len(xyzs))[:self.max_init_points]
             xyzs, rgbs = xyzs[idx], rgbs[idx]
         return xyzs, rgbs
 

@@ -272,7 +272,7 @@ class GaussianModel(nn.Module):
             raise ValueError(f"c2w 矩阵形状 {c2w.shape} 不合法，应为 (3,4) 或 (4,4)")
 
         # 做线性变换：P_cam = R_w2c @ P_world + t_w2c
-        cam_xyz = means @ R_w2c.T + t_w2c.squeeze(0)  # 形状 [N, 3]
+        cam_xyz = means @ R_w2c.T + t_w2c.squeeze(1)  # 形状 [N, 3]
         X, Y, Z = cam_xyz[:, 0], cam_xyz[:, 1], cam_xyz[:, 2]
         Z = torch.clamp(Z, min=eps)  # 避免除以 0
 
