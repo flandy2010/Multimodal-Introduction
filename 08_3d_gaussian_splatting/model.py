@@ -136,7 +136,8 @@ class GaussianModel(nn.Module):
         self.fx = fx
         self.fy = fy
 
-        self.sh_degree = sh_degree
+        self.sh_degree = sh_degree          # 最终目标阶数
+        self.active_sh_degree = 0           # 渐进激活：训练初期只用 0 阶
         self.n_sh_coeffs = (sh_degree + 1) ** 2
         self.radius = radius
 
@@ -194,8 +195,14 @@ class GaussianModel(nn.Module):
         return torch.sigmoid(self.opacity)
 
     def get_color_from_sh(self, viewdirs):
-        color = eval_sh(self.sh_degree, self.sh_coeffs, viewdirs)
+        # 用 active_sh_degree 而非 sh_degree，实现渐进激活
+        color = eval_sh(self.active_sh_degree, self.sh_coeffs, viewdirs)
         return (color + 0.5).clamp(0.0, 1.0)
+
+    def oneupSHdegree(self):
+        """每隔 1000 步调用一次，逐步开放更高阶 SH，论文标准做法"""
+        if self.active_sh_degree < self.sh_degree:
+            self.active_sh_degree += 1
 
     def forward(self, camera_pos=None):
         result = {
@@ -235,11 +242,14 @@ class GaussianModel(nn.Module):
 
     @torch.no_grad()
     def apply_constraints(self):
-        # 剔过大的噪音球
-        max_scale = self.radius * 0.1  # scene_radius * 0.1
-        self.gauss_params["scales"].clamp_(max=np.log(max_scale))
+        # 论文原版：剔除 log(scale) > log(scene_extent * percent_dense)
+        # percent_dense=0.01，scene_extent 即归一化后的 scene_radius
+        # 这里 radius 已是归一化后的场景半径（相机球半径，约 1.0）
+        # 论文实际用 0.01 * scene_radius 作为上界，约束更紧
+        max_log_scale = np.log(self.radius * 0.01)  # 0.01 * radius（论文标准）
+        self.gauss_params["scales"].clamp_(max=max_log_scale)
         # 约束不能偏离中心太远
-        limit = self.radius * 2.0
+        limit = self.radius * 1.5  # 论文用 scene_extent，比之前的 2.0 更严格
         self.gauss_params["means"].clamp_(-limit, limit)
 
     @torch.no_grad()
@@ -363,21 +373,23 @@ class GaussianModel(nn.Module):
         # 获取物理属性（注意：scales和opacities已经是经过 exp/sigmoid 还原的物理值）
         scales = self.get_scaling()  # [N, 3]
         opacities = self.get_opacity().squeeze()  # [N]
-        scale_mean = scales.mean(dim=-1)  # [N] 平均半径
+        scale_max = scales.max(dim=-1).values  # [N] 最大轴半径（论文用 max 而非 mean）
 
         # 需要增密的点：屏幕空间梯度 > 阈值
         need_densify = grads > grad_threshold
 
-        # Split（大点分裂）：梯度大 且 平均半径 > 0.01
-        split_mask = need_densify & (scale_mean > 0.01)
+        # Split（大点分裂）：梯度大 且 最大轴半径 > percent_dense * scene_extent
+        # 论文：percent_dense=0.01，scene_extent=radius
+        split_threshold = self.radius * 0.01
+        split_mask = need_densify & (scale_max > split_threshold)
 
-        # Clone（小点克隆）：梯度大 且 平均半径 <= 0.01
-        clone_mask = need_densify & (scale_mean <= 0.01)
+        # Clone（小点克隆）：梯度大 且 最大轴半径 <= 阈值
+        clone_mask = need_densify & (scale_max <= split_threshold)
 
-        # Prune（剪枝）：透明度太低 或 尺度超过限制
+        # Prune（剪枝）：透明度太低 或 最大轴尺度超过限制
         prune_mask = opacities < min_opacity
         if max_scale is not None:
-            prune_mask = prune_mask | (scale_mean > max_scale)
+            prune_mask = prune_mask | (scale_max > max_scale)
 
         # ==================== 4. 如果没有变化，清空梯度后提前返回 ====================
         if not (split_mask.any() or clone_mask.any() or prune_mask.any()):

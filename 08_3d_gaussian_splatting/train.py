@@ -66,12 +66,16 @@ def train(args):
 
     pbar = tqdm(range(args.n_iters), desc="3DGS Training")
     for step in pbar:
-        # --- A. Means LR 指数衰减（只衰减 means，其他保持恒定）---
+        # --- A. Means LR 指数衰减 + SH 渐进激活 ---
         lr_ratio = (means_lr_final / means_lr_init) ** (step / args.n_iters)
         means_lr = means_lr_init * lr_ratio
         for param_group in optimizer.param_groups:
             if param_group['name'] == 'means':
                 param_group['lr'] = means_lr
+
+        # 每 1000 步开放一阶 SH（论文标准：0→1→2→3 阶逐步激活）
+        if step > 0 and step % 1000 == 0:
+            model.oneupSHdegree()
 
         # --- B. 渲染 ---
         idx = np.random.randint(len(loader.images))
@@ -129,10 +133,11 @@ def train(args):
             "L1": f"{loss_l1.item():.4f}",
             "Ls": f"{loss_ssim.item():.4f}",
             "Pts": model.num_points,
-            'eff': f"{stats['effective_fraction']:.2f}",  # 有效占比
-            'low_op': f"{stats['frac_opacity_below_0.05']:.2f}",  # 低透明度占比
-            'max_r': f"{stats['avg_radius_max']:.3f}",  # 最大尺度
-            'SH_hi': f"{stats['sh_high_dc_ratio']:.3f}"  # 高阶/直流比
+            'eff': f"{stats['effective_fraction']:.2f}",
+            'low_op': f"{stats['frac_opacity_below_0.05']:.2f}",
+            'max_r': f"{stats['avg_radius_max']:.3f}",
+            'SH': f"{model.active_sh_degree}/{model.sh_degree}",  # 渐进激活进度
+            'SH_hi': f"{stats['sh_high_dc_ratio']:.3f}"
         })
 
         if step % args.display_int == 0 or step == args.n_iters - 1:

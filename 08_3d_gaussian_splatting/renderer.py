@@ -278,9 +278,6 @@ def mps_rasterizer(gaussians, w2c, K, H, W, tile_size=64):
     return output
 
 
-
-
-
 def simple_rasterizer(gaussians, w2c, K, H, W, camera_pos=None, tile_size=16,
                       gt_image=None, loss_fn=None):
     """
