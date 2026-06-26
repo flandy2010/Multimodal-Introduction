@@ -203,11 +203,17 @@ class GaussianModel(nn.Module):
             "scales": self.get_scaling(),
             "rotations": self.get_rotation(),
             "opacity": self.get_opacity(),
+            # 原始叶节点参数引用，供 simple_rasterizer 手动写梯度用
+            "_raw_opacity":   self.gauss_params["opacities"],   # logit, leaf
+            "_raw_sh_coeffs": self.gauss_params["sh_coeffs"],   # leaf
+            "_raw_scales":    self.gauss_params["scales"],       # log-space, leaf
+            "_raw_rotations": self.gauss_params["rotations"],    # unnorm quat, leaf
         }
 
         if camera_pos is not None:
-            viewdirs = camera_pos.unsqueeze(0) - self.means
-            viewdirs = viewdirs / (viewdirs.norm(dim=-1, keepdim=True) + 1e-8)
+            with torch.no_grad():
+                viewdirs = camera_pos.unsqueeze(0) - self.means.detach()
+                viewdirs = viewdirs / (viewdirs.norm(dim=-1, keepdim=True) + 1e-8)
             result["colors"] = self.get_color_from_sh(viewdirs)
         else:
             result["colors"] = (SH_C0 * self.sh_coeffs[:, 0] + 0.5).clamp(0.0, 1.0)

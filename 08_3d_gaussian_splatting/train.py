@@ -79,23 +79,43 @@ def train(args):
         gt_image, c2w, w2c, K, camera_pos = gt_image.to(device), c2w.to(device), w2c.to(device), K.to(device), camera_pos.to(device)
 
         gaussians = model(camera_pos=camera_pos)
-        # out_image = simple_rasterizer(gaussians, w2c, K, loader.H, loader.W, tile_size=args.tile_size)
-        # out_image = gsplat_rasterizer(gaussians, w2c, K, loader.H, loader.W, tile_size=args.tile_size)
-        out_image = auto_rasterizer(gaussians, w2c, K, loader.H, loader.W, tile_size=args.tile_size)
 
-        # --- C. 损失 ---
-        viewspace_points = gaussians.get("viewspace_points", None)
-        loss_l1, loss_ssim = strategy.get_loss(out_image, gt_image, model, step)
-        loss = 0.8 * loss_l1 + 0.1 * loss_ssim
-
-        if loss.grad_fn is None:
-            continue
+        # 提前 zero_grad，simple_rasterizer 训练模式会在内部逐 tile backward 累积梯度
         optimizer.zero_grad()
-        loss.backward()
+
+        raster_result = auto_rasterizer(gaussians, w2c, K, loader.H, loader.W,
+                                        tile_size=args.tile_size,
+                                        gt_image=gt_image,
+                                        loss_fn=None)  # simple路径内部直接用 L1-sum，loss_fn 不再需要
+
+        # --- C. 损失 & Backward ---
+        if isinstance(raster_result, tuple):
+            # simple_rasterizer 训练模式：内部已逐 tile backward 完毕
+            # raster_result = (out_image_detach, total_l1_loss)
+            out_image, loss_l1 = raster_result
+            # SSIM 在 detach 图上计算（仅用于监控，不参与梯度）
+            with torch.no_grad():
+                loss_ssim = strategy.get_loss(out_image, gt_image, model, step)[1]
+            loss = loss_l1  # 梯度已通过 tile backward 累积，这里仅作日志用
+            if loss.grad_fn is not None:
+                pass  # 不再 backward
+        else:
+            # gsplat / mps 路径：正常 backward
+            out_image = raster_result
+            loss_l1, loss_ssim = strategy.get_loss(out_image, gt_image, model, step)
+            loss = 0.8 * loss_l1 + 0.1 * loss_ssim
+            if loss.grad_fn is None:
+                gaussians.clear()
+                continue
+            loss.backward()
+
+        viewspace_points = gaussians.get("viewspace_points", None)
 
         # --- D. 密度策略 ---
-        # optimizer = strategy.step(step, model, optimizer)
         optimizer = strategy.step(step, model, optimizer, c2w=c2w, viewspace_points=viewspace_points)
+
+        # 主动清理 gaussians 字典
+        gaussians.clear()
 
         # --- E. 更新 + 约束 ---
         optimizer.step()
@@ -109,10 +129,10 @@ def train(args):
             "L1": f"{loss_l1.item():.4f}",
             "Ls": f"{loss_ssim.item():.4f}",
             "Pts": model.num_points,
-            'eff': f"{stats['effective_fraction']:.2f}",  # 不透明度 > 0.05的点的占比
-            'low_op': f"{stats['frac_opacity_below_0.05']:.2f}",  # 不透明度小于 0.05 的椭球占比
-            'max_r': f"{stats['avg_radius_max']:.3f}",  # 最大高斯球半径
-            'SH_hi': f"{stats['sh_high_dc_ratio']:.3f}"  # 视角相关分量强度 / 基础色强度
+            'eff': f"{stats['effective_fraction']:.2f}",  # 有效占比
+            'low_op': f"{stats['frac_opacity_below_0.05']:.2f}",  # 低透明度占比
+            'max_r': f"{stats['avg_radius_max']:.3f}",  # 最大尺度
+            'SH_hi': f"{stats['sh_high_dc_ratio']:.3f}"  # 高阶/直流比
         })
 
         if step % args.display_int == 0 or step == args.n_iters - 1:
