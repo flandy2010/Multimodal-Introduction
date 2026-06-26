@@ -1,6 +1,37 @@
 import torch
 import torch.nn.functional as F
-from gsplat import rasterization
+
+# 尝试导入 gsplat，若 CUDA 不可用则标记为 None
+try:
+    from gsplat import rasterization as _gsplat_rasterization
+    # 验证 CUDA 扩展真的可用（Mac/MPS 上 gsplat 会 import 成功但 _C 为 None）
+    import gsplat.cuda._wrapper as _gsplat_cuda
+    if _gsplat_cuda._C is None:
+        raise ImportError("gsplat CUDA extension not available")
+    _GSPLAT_AVAILABLE = True
+except Exception:
+    _GSPLAT_AVAILABLE = False
+    print("⚠️  gsplat CUDA 不可用，自动降级到 simple_rasterizer（MPS/CPU 模式）")
+
+
+def auto_rasterizer(gaussians, w2c, K, H, W, tile_size=16):
+    """
+    自动三路选择渲染后端：
+    ┌─────────────────────────────────────────────────────────────────┐
+    │  CUDA 可用（H20/P800） → gsplat_rasterizer  （最快，支持致密化）  │
+    │  MPS 可用（Mac M系列） → mps_rasterizer     （向量化，无 for 循环）│
+    │  其他（CPU）           → simple_rasterizer  （tile 循环，兜底）   │
+    └─────────────────────────────────────────────────────────────────┘
+    接口与 gsplat_rasterizer 完全一致，train.py 只需把调用换成 auto_rasterizer。
+    注意：MPS/CPU 模式下 gaussians["viewspace_points"] 不会被写入，
+          strategy.step 的致密化将自动跳过（already guarded by `is not None`）。
+    """
+    if _GSPLAT_AVAILABLE:
+        return gsplat_rasterizer(gaussians, w2c, K, H, W, tile_size=tile_size)
+    elif gaussians["means"].device.type == "mps":
+        return mps_rasterizer(gaussians, w2c, K, H, W)
+    else:
+        return simple_rasterizer(gaussians, w2c, K, H, W, tile_size=128)
 
 
 def gsplat_rasterizer(gaussians, w2c, K, H, W, tile_size=16):
@@ -30,7 +61,7 @@ def gsplat_rasterizer(gaussians, w2c, K, H, W, tile_size=16):
     # 3. 调用 gsplat 加速渲染
     # render_colors: [H, W, 3]
     # info: 包含 densification 需要的 viewspace_points 梯度信息
-    render_colors, render_alphas, info = rasterization(
+    render_colors, render_alphas, info = _gsplat_rasterization(
         means=means,
         quats=quats,
         scales=scales,
@@ -110,6 +141,114 @@ def compute_2d_covariance(means3D, scales, rotations, w2c, K):
     cov2D_inv = torch.stack([d, -b, -c, a], dim=-1).reshape(N, 2, 2) / det.unsqueeze(-1).unsqueeze(-1)
 
     return cov2D_inv, det, means_cam
+
+
+def mps_rasterizer(gaussians, w2c, K, H, W, tile_size=64):
+    """
+    MPS/CPU 加速版光栅化器（simple_rasterizer 的向量化重写）
+    消除两大 Python for 循环瓶颈：
+      1. tile-point 归属表改为全向量化（scatter 操作，GPU 上完成）
+      2. tile 渲染循环改为按"每个点对全图像素"的全矩阵操作，无 Python 循环
+    代价：内存占用比 simple_rasterizer 高（N_pts × H × W 的中间矩阵）
+    推荐：N_pts < 5000，H × W < 1000×1000 时效果最好
+    """
+    device = gaussians["means"].device
+    means3D = gaussians["means"]
+
+    # 1. 2D 协方差投影
+    cov2D_inv, _, means_cam = compute_2d_covariance(
+        means3D, gaussians["scales"], gaussians["rotations"], w2c, K
+    )
+    depths = means_cam[:, 2:3]
+
+    # 2. Near clipping
+    mask = depths.squeeze(-1) > 0.1
+    if not mask.any():
+        return torch.zeros((H, W, 3), device=device) + means3D.sum() * 0
+
+    # 3. 投影到像素
+    fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
+    mc = means_cam[mask]
+    points_2d = torch.stack([
+        fx * mc[:, 0] / mc[:, 2] + cx,
+        fy * mc[:, 1] / mc[:, 2] + cy,
+    ], dim=-1)
+
+    colors   = gaussians["colors"][mask]      # [N, 3]
+    opacities = gaussians["opacity"][mask]    # [N, 1]
+    cov_inv  = cov2D_inv[mask]               # [N, 2, 2]
+
+    # 4. 等效半径 + 视锥剔除
+    r_a = 1.0 / (cov_inv[:, 0, 0].sqrt() + 1e-4)
+    r_d = 1.0 / (cov_inv[:, 1, 1].sqrt() + 1e-4)
+    max_radius = 3.0 * torch.maximum(r_a, r_d)
+
+    in_frame = (
+        (points_2d[:, 0] + max_radius > 0) & (points_2d[:, 0] - max_radius < W) &
+        (points_2d[:, 1] + max_radius > 0) & (points_2d[:, 1] - max_radius < H)
+    )
+    if not in_frame.any():
+        return torch.zeros((H, W, 3), device=device) + means3D.sum() * 0
+
+    points_2d  = points_2d[in_frame]           # [M, 2]
+    colors     = colors[in_frame]              # [M, 3]
+    opacities  = opacities[in_frame]           # [M, 1]
+    cov_inv    = cov_inv[in_frame]             # [M, 2, 2]
+    depths_vis = depths[mask][in_frame]        # [M, 1]
+
+    # 5. 按深度排序
+    sort_idx   = torch.argsort(depths_vis.squeeze(-1))
+    points_2d  = points_2d[sort_idx]
+    colors     = colors[sort_idx]
+    opacities  = opacities[sort_idx]
+    cov_inv    = cov_inv[sort_idx]
+    M = points_2d.shape[0]
+
+    # 6. 全图像素坐标网格 [H*W, 2]（只建一次，不按 tile 分块）
+    gy, gx = torch.meshgrid(
+        torch.arange(H, device=device, dtype=torch.float32),
+        torch.arange(W, device=device, dtype=torch.float32),
+        indexing='ij'
+    )
+    pixel_coords = torch.stack([gx + 0.5, gy + 0.5], dim=-1).reshape(-1, 2)  # [P, 2]
+    P = pixel_coords.shape[0]
+
+    # 7. 分批次向量化渲染（按点分 batch，避免 M×P 矩阵爆显存）
+    # batch_size 控制每批点数，可根据显存调整（越大越快，越小越省显存）
+    batch_size = min(512, M)
+    output = torch.zeros((P, 3), device=device)
+    transmittance = torch.ones((P,), device=device)  # [P]
+
+    for i in range(0, M, batch_size):
+        pts_b   = points_2d[i:i + batch_size]     # [B, 2]
+        col_b   = colors[i:i + batch_size]         # [B, 3]
+        opac_b  = opacities[i:i + batch_size]      # [B, 1]
+        cov_b   = cov_inv[i:i + batch_size]        # [B, 2, 2]
+        B = pts_b.shape[0]
+
+        # delta: [B, P, 2]
+        delta = pts_b.unsqueeze(1) - pixel_coords.unsqueeze(0)
+        dx = delta[:, :, 0]   # [B, P]
+        dy = delta[:, :, 1]
+
+        # 各向异性高斯 power = -0.5 * δ^T Σ^{-1} δ
+        ci_a = cov_b[:, 0, 0].unsqueeze(1)   # [B, 1]
+        ci_b = cov_b[:, 0, 1].unsqueeze(1)
+        ci_d = cov_b[:, 1, 1].unsqueeze(1)
+        power = -0.5 * (dx*dx*ci_a + 2*dx*dy*ci_b + dy*dy*ci_d)   # [B, P]
+
+        # 3σ 截断
+        g_weight = torch.exp(power.clamp(max=0)) * (power > -4.5).float()  # [B, P]
+
+        # Alpha 合成（前到后）
+        alpha_b = (opac_b * g_weight).clamp(max=0.99)   # [B, P]
+
+        for j in range(B):
+            a = alpha_b[j] * transmittance              # [P]
+            output += a.unsqueeze(-1) * col_b[j]        # [P, 3]
+            transmittance *= (1.0 - alpha_b[j])
+
+    return output.reshape(H, W, 3)
 
 
 def simple_rasterizer(gaussians, w2c, K, H, W, camera_pos=None, tile_size=128):

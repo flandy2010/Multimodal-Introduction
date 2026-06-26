@@ -7,7 +7,7 @@ from tqdm import tqdm
 from dataloader import GSDataLoader
 from model import GaussianModel
 from logger import GSLogger
-from renderer import simple_rasterizer, gsplat_rasterizer
+from renderer import simple_rasterizer, gsplat_rasterizer, auto_rasterizer
 from strategy import GaussianStrategy
 
 
@@ -80,7 +80,8 @@ def train(args):
 
         gaussians = model(camera_pos=camera_pos)
         # out_image = simple_rasterizer(gaussians, w2c, K, loader.H, loader.W, tile_size=args.tile_size)
-        out_image = gsplat_rasterizer(gaussians, w2c, K, loader.H, loader.W, tile_size=args.tile_size)
+        # out_image = gsplat_rasterizer(gaussians, w2c, K, loader.H, loader.W, tile_size=args.tile_size)
+        out_image = auto_rasterizer(gaussians, w2c, K, loader.H, loader.W, tile_size=args.tile_size)
 
         # --- C. 损失 ---
         viewspace_points = gaussians.get("viewspace_points", None)
