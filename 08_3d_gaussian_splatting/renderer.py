@@ -145,12 +145,9 @@ def compute_2d_covariance(means3D, scales, rotations, w2c, K):
 
 def mps_rasterizer(gaussians, w2c, K, H, W, tile_size=64):
     """
-    MPS/CPU 加速版光栅化器（simple_rasterizer 的向量化重写）
-    消除两大 Python for 循环瓶颈：
-      1. tile-point 归属表改为全向量化（scatter 操作，GPU 上完成）
-      2. tile 渲染循环改为按"每个点对全图像素"的全矩阵操作，无 Python 循环
-    代价：内存占用比 simple_rasterizer 高（N_pts × H × W 的中间矩阵）
-    推荐：N_pts < 5000，H × W < 1000×1000 时效果最好
+    MPS/CPU 加速版光栅化器（Tile-based 向量化，低显存）
+    核心思路：按 tile 分块渲染，每次只处理一个 tile 的像素，
+    避免 [B, H*W] 全图矩阵——H*W=26万像素时一次 batch 要 5GB。
     """
     device = gaussians["means"].device
     means3D = gaussians["means"]
@@ -174,9 +171,9 @@ def mps_rasterizer(gaussians, w2c, K, H, W, tile_size=64):
         fy * mc[:, 1] / mc[:, 2] + cy,
     ], dim=-1)
 
-    colors   = gaussians["colors"][mask]      # [N, 3]
-    opacities = gaussians["opacity"][mask]    # [N, 1]
-    cov_inv  = cov2D_inv[mask]               # [N, 2, 2]
+    colors    = gaussians["colors"][mask]    # [N, 3]
+    opacities = gaussians["opacity"][mask]   # [N, 1]
+    cov_inv   = cov2D_inv[mask]             # [N, 2, 2]
 
     # 4. 等效半径 + 视锥剔除
     r_a = 1.0 / (cov_inv[:, 0, 0].sqrt() + 1e-4)
@@ -190,11 +187,12 @@ def mps_rasterizer(gaussians, w2c, K, H, W, tile_size=64):
     if not in_frame.any():
         return torch.zeros((H, W, 3), device=device) + means3D.sum() * 0
 
-    points_2d  = points_2d[in_frame]           # [M, 2]
-    colors     = colors[in_frame]              # [M, 3]
-    opacities  = opacities[in_frame]           # [M, 1]
-    cov_inv    = cov_inv[in_frame]             # [M, 2, 2]
-    depths_vis = depths[mask][in_frame]        # [M, 1]
+    points_2d  = points_2d[in_frame]
+    colors     = colors[in_frame]
+    opacities  = opacities[in_frame]
+    cov_inv    = cov_inv[in_frame]
+    max_radius = max_radius[in_frame]
+    depths_vis = depths[mask][in_frame]
 
     # 5. 按深度排序
     sort_idx   = torch.argsort(depths_vis.squeeze(-1))
@@ -202,53 +200,88 @@ def mps_rasterizer(gaussians, w2c, K, H, W, tile_size=64):
     colors     = colors[sort_idx]
     opacities  = opacities[sort_idx]
     cov_inv    = cov_inv[sort_idx]
+    max_radius = max_radius[sort_idx]
     M = points_2d.shape[0]
 
-    # 6. 全图像素坐标网格 [H*W, 2]（只建一次，不按 tile 分块）
-    gy, gx = torch.meshgrid(
-        torch.arange(H, device=device, dtype=torch.float32),
-        torch.arange(W, device=device, dtype=torch.float32),
-        indexing='ij'
-    )
-    pixel_coords = torch.stack([gx + 0.5, gy + 0.5], dim=-1).reshape(-1, 2)  # [P, 2]
-    P = pixel_coords.shape[0]
+    # 6. 预计算 tile 归属（向量化，全在 GPU 完成，无 Python 循环）
+    n_tiles_h = (H + tile_size - 1) // tile_size
+    n_tiles_w = (W + tile_size - 1) // tile_size
 
-    # 7. 分批次向量化渲染（按点分 batch，避免 M×P 矩阵爆显存）
-    # batch_size 控制每批点数，可根据显存调整（越大越快，越小越省显存）
-    batch_size = min(512, M)
-    output = torch.zeros((P, 3), device=device)
-    transmittance = torch.ones((P,), device=device)  # [P]
+    pts_x = points_2d[:, 0]
+    pts_y = points_2d[:, 1]
+    tile_x_min = ((pts_x - max_radius) / tile_size).floor().clamp(0, n_tiles_w - 1).int()
+    tile_x_max = ((pts_x + max_radius) / tile_size).floor().clamp(0, n_tiles_w - 1).int()
+    tile_y_min = ((pts_y - max_radius) / tile_size).floor().clamp(0, n_tiles_h - 1).int()
+    tile_y_max = ((pts_y + max_radius) / tile_size).floor().clamp(0, n_tiles_h - 1).int()
 
-    for i in range(0, M, batch_size):
-        pts_b   = points_2d[i:i + batch_size]     # [B, 2]
-        col_b   = colors[i:i + batch_size]         # [B, 3]
-        opac_b  = opacities[i:i + batch_size]      # [B, 1]
-        cov_b   = cov_inv[i:i + batch_size]        # [B, 2, 2]
-        B = pts_b.shape[0]
+    # CPU numpy 仅用于 tile 索引构建（一次性，开销很小）
+    tx_min = tile_x_min.cpu().numpy()
+    tx_max = tile_x_max.cpu().numpy()
+    ty_min = tile_y_min.cpu().numpy()
+    ty_max = tile_y_max.cpu().numpy()
 
-        # delta: [B, P, 2]
-        delta = pts_b.unsqueeze(1) - pixel_coords.unsqueeze(0)
-        dx = delta[:, :, 0]   # [B, P]
-        dy = delta[:, :, 1]
+    tile_point_lists = [[[] for _ in range(n_tiles_w)] for _ in range(n_tiles_h)]
+    for i in range(M):
+        for ty in range(ty_min[i], ty_max[i] + 1):
+            for tx in range(tx_min[i], tx_max[i] + 1):
+                tile_point_lists[ty][tx].append(i)
 
-        # 各向异性高斯 power = -0.5 * δ^T Σ^{-1} δ
-        ci_a = cov_b[:, 0, 0].unsqueeze(1)   # [B, 1]
-        ci_b = cov_b[:, 0, 1].unsqueeze(1)
-        ci_d = cov_b[:, 1, 1].unsqueeze(1)
-        power = -0.5 * (dx*dx*ci_a + 2*dx*dy*ci_b + dy*dy*ci_d)   # [B, P]
+    # 7. Tile-based 渲染：每次只处理一个 tile 的像素，显存 ∝ tile_size²，可控
+    output = torch.zeros((H, W, 3), device=device)
+    max_per_tile = 2000
 
-        # 3σ 截断
-        g_weight = torch.exp(power.clamp(max=0)) * (power > -4.5).float()  # [B, P]
+    for ty in range(n_tiles_h):
+        for tx in range(n_tiles_w):
+            pt_indices = tile_point_lists[ty][tx]
+            if not pt_indices:
+                continue
 
-        # Alpha 合成（前到后）
-        alpha_b = (opac_b * g_weight).clamp(max=0.99)   # [B, P]
+            y_start = ty * tile_size
+            y_end   = min(y_start + tile_size, H)
+            x_start = tx * tile_size
+            x_end   = min(x_start + tile_size, W)
+            tile_h  = y_end - y_start
+            tile_w  = x_end - x_start
+            n_pixels = tile_h * tile_w  # tile_size²，最大约 4096（64²）
 
-        for j in range(B):
-            a = alpha_b[j] * transmittance              # [P]
-            output += a.unsqueeze(-1) * col_b[j]        # [P, 3]
-            transmittance *= (1.0 - alpha_b[j])
+            idx_t    = torch.tensor(pt_indices[:max_per_tile], device=device, dtype=torch.long)
+            t_pts    = points_2d.index_select(0, idx_t)   # [M_tile, 2]
+            t_colors = colors.index_select(0, idx_t)       # [M_tile, 3]
+            t_opac   = opacities.index_select(0, idx_t)    # [M_tile, 1]
+            t_cov    = cov_inv.index_select(0, idx_t)      # [M_tile, 2, 2]
+            M_tile   = idx_t.shape[0]
 
-    return output.reshape(H, W, 3)
+            # 像素坐标 [n_pixels, 2]，只有 tile 内的像素
+            gy, gx = torch.meshgrid(
+                torch.arange(y_start, y_end, device=device, dtype=torch.float32),
+                torch.arange(x_start, x_end, device=device, dtype=torch.float32),
+                indexing='ij'
+            )
+            tile_coords = torch.stack([gx + 0.5, gy + 0.5], dim=-1).reshape(1, -1, 2)
+
+            # 关键：delta 形状是 [M_tile, n_pixels, 2]
+            # M_tile ≤ 2000，n_pixels ≤ tile_size² = 4096（tile_size=64）
+            # 最大中间张量：2000 × 4096 × 4B = 32 MB，完全可控
+            delta = t_pts.unsqueeze(1) - tile_coords
+            dx = delta[:, :, 0]
+            dy = delta[:, :, 1]
+            ci_a = t_cov[:, 0, 0].unsqueeze(1)
+            ci_b = t_cov[:, 0, 1].unsqueeze(1)
+            ci_d = t_cov[:, 1, 1].unsqueeze(1)
+            power = -0.5 * (dx*dx*ci_a + 2*dx*dy*ci_b + dy*dy*ci_d)
+            g_weight = torch.exp(power.clamp(max=0)) * (power > -4.5).float()
+
+            alphas = (t_opac * g_weight).clamp(max=0.99)  # [M_tile, n_pixels]
+            one_minus = 1.0 - alphas
+            transmittance = torch.cumprod(
+                torch.cat([torch.ones((1, n_pixels), device=device), one_minus[:-1] + 1e-6], dim=0),
+                dim=0
+            )  # [M_tile, n_pixels]
+            weights = alphas * transmittance  # [M_tile, n_pixels]
+            tile_colors = torch.sum(weights.unsqueeze(-1) * t_colors.unsqueeze(1), dim=0)
+            output[y_start:y_end, x_start:x_end] = tile_colors.view(tile_h, tile_w, 3)
+
+    return output
 
 
 def simple_rasterizer(gaussians, w2c, K, H, W, camera_pos=None, tile_size=128):

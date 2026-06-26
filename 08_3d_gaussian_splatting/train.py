@@ -133,7 +133,7 @@ def main():
     parser.add_argument("--sh_degree", type=int, default=3, help="SH degree (0=DC, 3=full)")
     parser.add_argument("--tile_size", type=int, default=128, help="Render tile size")
     parser.add_argument("--grad_threshold", type=float, default=0.0002, help="Densify grad threshold")
-    parser.add_argument("--display_int", type=int, default=500)
+    parser.add_argument("--display_int", type=int, default=100)
     parser.add_argument("--device", type=str, default="auto")
 
     args = parser.parse_args()
