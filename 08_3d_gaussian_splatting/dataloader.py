@@ -15,6 +15,10 @@ def qvec2rotmat(q):
 
 
 class GSDataLoader:
+    # SCENE_RADIUS 仅作参考默认值；实际 radius 由 load_points3d() 从数据自动计算
+    # （取点云距离 p95，clip 到 [2.0, 5.0]），存在 self.scene_radius 中。
+    SCENE_RADIUS = 3.0
+
     def __init__(self, data_path, factor=8, max_init_points=15000):
         self.path = Path(data_path)
         self.factor = factor
@@ -30,7 +34,7 @@ class GSDataLoader:
         # 4. 加载图片
         self.images = self.load_images()
 
-        print(f"✅ 对齐完成 | 分辨率: {self.W}x{self.H} | 点数: {len(self.initial_points)}")
+        print(f"✅ 对齐完成 | 分辨率: {self.W}x{self.H} | 点数: {len(self.initial_points)} | scene_radius: {self.scene_radius:.2f}")
 
     def load_intrinsics(self):
 
@@ -116,10 +120,13 @@ class GSDataLoader:
         rgbs = torch.from_numpy(np.array(rgbs)).float() / 255.0
 
         # 过滤离群点：只保留在相机球体附近的点（半径基于相机分布），避免colmap导致的飞点
-        # 相机归一化后 max abs = 1.0，保留 radius 倍范围内的点
-        radius = 3.0
+        # 取点云距离 p75 作为过滤半径（自动适配不同场景）：
+        #   - p75 保留主要前景，过滤掉远景噪点和 COLMAP 飞点
+        #   - clip 到 [2.0, 4.0]：下限确保覆盖相机球 2 倍范围，上限避免引入太多背景
         point_norms = torch.norm(xyzs, dim=-1)
-        inlier_mask = point_norms < radius
+        radius_auto = float(torch.quantile(point_norms, 0.75).item())
+        self.scene_radius = float(np.clip(radius_auto, 2.0, 4.0))
+        inlier_mask = point_norms < self.scene_radius
         xyzs = xyzs[inlier_mask]
         rgbs = rgbs[inlier_mask]
 
@@ -155,8 +162,7 @@ class GSDataLoader:
         return self.initial_points, self.initial_colors
 
     def get_normalization_params(self):
-        # radius 应与点云过滤半径一致
-        return {"radius": 3.0}
+        return {"radius": self.scene_radius}
 
 
 if __name__ == "__main__":

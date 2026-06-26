@@ -79,14 +79,13 @@ class GaussianStrategy:
     #
     #     return optimizer
 
-    def step(self, step, model, optimizer, c2w, viewspace_points=None):  # 增加参数
+    def step(self, step, model, optimizer, c2w, viewspace_points=None, image_hw=None):
         """每步调用：增加梯度累积 + 密度控制 + 透明度重置"""
 
         # --- 新增：梯度累积 (SDF 训练不需要，但 3DGS 必须有) ---
         # 只有在致密化区间内，才需要累积 2D 梯度
         if step < self.densify_until_iter and viewspace_points is not None:
-            # 这个方法需要在你的 GaussianModel 中实现，用来记录 viewspace_points.grad
-            model.update_densification_stats(viewspace_points)
+            model.update_densification_stats(viewspace_points, image_hw=image_hw)
 
         # 密度控制：每 100 步执行 (保持不变)
         if (self.densify_from_iter <= step < self.densify_until_iter

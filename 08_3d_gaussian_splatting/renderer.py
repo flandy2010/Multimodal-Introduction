@@ -4,10 +4,23 @@ import torch.nn.functional as F
 # 尝试导入 gsplat，若 CUDA 不可用则标记为 None
 try:
     from gsplat import rasterization as _gsplat_rasterization
-    # 验证 CUDA 扩展真的可用（Mac/MPS 上 gsplat 会 import 成功但 _C 为 None）
+    # 验证 CUDA 扩展真的可用：
+    # gsplat >= 1.0 用 _make_lazy_cuda_func 延迟加载，不再有 _C 属性；
+    # 改为调用一个轻量 CUDA 函数来触发加载并确认可用性。
     import gsplat.cuda._wrapper as _gsplat_cuda
-    if _gsplat_cuda._C is None:
-        raise ImportError("gsplat CUDA extension not available")
+    if hasattr(_gsplat_cuda, '_C'):
+        # 旧版 gsplat (0.x) 的兼容检测
+        if _gsplat_cuda._C is None:
+            raise ImportError("gsplat CUDA extension not available")
+    else:
+        # 新版 gsplat (>= 1.0)：尝试触发一次 CUDA kernel 加载
+        import torch
+        if not torch.cuda.is_available():
+            raise ImportError("gsplat requires CUDA but CUDA is not available")
+        _gsplat_cuda.isect_offset_encode(
+            torch.zeros(0, dtype=torch.int64, device="cuda"),
+            0, 0, 0
+        )
     _GSPLAT_AVAILABLE = True
 except Exception:
     _GSPLAT_AVAILABLE = False
@@ -43,12 +56,19 @@ def gsplat_rasterizer(gaussians, w2c, K, H, W, tile_size=16):
     gaussians: 一个字典或对象，包含 means, scales, quats, opacities, colors/shs
     w2c: [4, 4] 矩阵 (World-to-Camera)
     K: [3, 3] 矩阵 (Camera Intrinsics)
+
+    注意：gsplat CUDA kernel 的 tile_size 只支持 16 和 32（每 block 线程数 = tile_size²，
+    上限 1024），传入更大的值（如 64）会触发 cudaErrorInvalidConfiguration。
+    此处强制限制在安全值内，tile_size 参数仅对 simple/mps rasterizer 有意义。
     """
-    # 1. 提取参数并进行必要的激活
+    gsplat_tile_size = min(tile_size, 16)  # gsplat 只支持 16（及 32，但 16 最安全）
+    # 1. 提取参数
+    # 注意：model.forward 传入的 gaussians 中，scales/rotations/opacity/colors
+    # 已经经过 exp/normalize/sigmoid/clamp 等激活，这里直接使用，不要重复激活。
     means = gaussians["means"]                                         # [N, 3] 保留梯度
-    scales = torch.exp(gaussians["scales"])                            # [N, 3]
-    quats = F.normalize(gaussians["rotations"], p=2, dim=-1)           # [N, 4]
-    opacities = torch.sigmoid(gaussians["opacity"]).squeeze(-1)        # [N]
+    scales = gaussians["scales"]                                       # [N, 3] 已是物理尺度（exp 过）
+    quats = gaussians["rotations"]                                     # [N, 4] 已归一化
+    opacities = gaussians["opacity"].squeeze(-1)                       # [N]    已是 sigmoid 后的值
     colors = gaussians["colors"]                                       # [N, 3]
 
     # 2. 构造 viewmat (gsplat 需要 [4, 4])
@@ -71,7 +91,7 @@ def gsplat_rasterizer(gaussians, w2c, K, H, W, tile_size=16):
         Ks=K,
         width=W,
         height=H,
-        tile_size=tile_size,
+        tile_size=gsplat_tile_size,
         absgrad=True,  # 官方推荐：用 absgrad 替代 retain_grad()
     )
 
@@ -79,6 +99,8 @@ def gsplat_rasterizer(gaussians, w2c, K, H, W, tile_size=16):
     # 不再需要 retain_grad()，计算图可在 backward 后正常释放。
     if means.requires_grad:
         gaussians["viewspace_points"] = info["means2d"]
+
+    render_colors = render_colors.squeeze(0)
 
     return render_colors
 

@@ -1,293 +1,523 @@
-import os
 import torch
+import torch.nn as nn
 import numpy as np
-import json
-import matplotlib.pyplot as plt
-from skimage.metrics import structural_similarity as ssim_func
-import datetime
-from model import SH_C0
 
 
-class GSLogger:
-    def __init__(self, exp_dir, args):
-        self.exp_dir = exp_dir
-        self.vis_dir = os.path.join(exp_dir, "visuals")
-        os.makedirs(self.vis_dir, exist_ok=True)
+# --- SH 球谐函数工具 ---
+SH_C0 = 0.28209479177387814
+SH_C1 = 0.4886025119029199
+SH_C2 = [
+    1.0925484305920792,
+    -1.0925484305920792,
+    0.31539156525252005,
+    -1.0925484305920792,
+    0.5462742152960396,
+]
+SH_C3 = [
+    -0.5900435899266435,
+    2.890611442640554,
+    -0.4570457994644658,
+    0.3731763325901154,
+    -0.4570457994644658,
+    1.4453057213202769,
+    -0.5900435899266435,
+]
 
-        # 保存配置
-        with open(os.path.join(exp_dir, "args.json"), "w") as f:
-            json.dump(vars(args), f, indent=4)
 
-        # 两个独立文件：汇总表 + 模型状态详情
-        self.summary_path = os.path.join(exp_dir, "summary.md")
-        self.detail_path = os.path.join(exp_dir, "model_states.md")
+def eval_sh(deg, sh_coeffs, dirs):
+    """
+    评估球谐函数 (Evaluate Spherical Harmonics)
+    --------------------------------------------------------------
+    功能: 给定观察方向，利用存储的球谐系数计算出该方向下的RGB颜色。
+    这是3DGS实现“视角相关外观”（如金属反光、光泽感）的核心数学引擎。
 
-        # 初始化汇总表（连续表格，不被打断）
-        with open(self.summary_path, "w") as f:
-            f.write(f"# 3DGS 训练汇总\n")
-            f.write(f"生成时间: {datetime.datetime.now()}\n\n")
+    Args:
+        deg (int): 球谐函数的阶数 (通常为3)。决定了表达复杂度的上限。
+        sh_coeffs (torch.Tensor): 形状 [N, n_sh, 3]。
+            存储的系数，n_sh = (deg+1)^2 (deg=3时为16)。
+            其中 [:, 0, :] 是0阶(DC)， [:, 1:, :] 是高阶系数，全部可训练。
+        dirs (torch.Tensor): 形状 [N, 3]。归一化的观察方向向量。
+            注意：这里的 (x, y, z) 是方向向量的分量，不是高斯球的空间坐标！
 
-        # 初始化模型状态详情
-        with open(self.detail_path, "w") as f:
-            f.write(f"# 3DGS 模型状态详情\n\n")
+    Returns:
+        torch.Tensor: 形状 [N, 3]，即该高斯球在此观察方向下应呈现的RGB颜色。
 
-        # 记录初始状态用于对比
-        self._initial_means = None
-        self._initial_scales = None
-        self._initial_colors = None
-        self._table_started = False
+    --------------------------------------------------------------
+    物理意义与运算详解 (含索引映射表):
 
-    def _format_list(self, lst):
-        return "[" + ", ".join([f"{x:.4f}" for x in lst]) + "]"
+    球谐基函数将“球面上的颜色分布”分解为不同频率的波。
+    color(dir) = Σ_{l} Σ_{m} c_{l,m} * Y_{l,m}(dir)
 
-    def log_dataset_stats(self, loader):
-        """记录数据集分布（写入汇总表头部）"""
-        # loader.images 改为懒加载列表，采样一张图估算像素均值，避免全量加载
-        sample_img, *_ = loader.get_view_params(0)
-        img_mean = sample_img.mean().item()
-        img_std = sample_img.std().item()
-        centers = loader.poses[:, :3, 3]
-        dist_mean = torch.norm(centers, dim=1).mean().item()
+    代码中 SH_C0, SH_C1, SH_C2, SH_C3 是固定常数（归一化系数），
+    它们确保了基函数在球面上的正交性和能量守恒，不参与训练。
+    系数 c_{l,m} (即 sh_coeffs) 由梯度下降优化得出。
+    """
 
-        stats = f"## 数据集\n" \
-                f"- 分辨率: {loader.W}x{loader.H} | 视角: {len(loader.images)} | " \
-                f"像素均值(采样): {img_mean:.4f} | 相机距离: {dist_mean:.4f}\n\n"
+    # ==================== 第 0 阶 (l=0, m=0) ====================
+    # 运算: SH_C0 * sh_coeffs[:, 0]
+    # SH_C0 ≈ 0.28209479 (即 1/(2*sqrt(pi)))
+    # 物理意义: 球谐函数的“直流分量”。它不随观察方向变化，
+    #           代表物体的基础固有色/漫反射颜色（类似哑光材质的底色）。
+    #           这也是初始化时加载点云RGB填充的位置。
+    result = SH_C0 * sh_coeffs[:, 0]
 
-        with open(self.summary_path, "a") as f:
-            f.write(stats)
-        print(f"📊 数据统计已记录: 均值 {img_mean:.4f}, 距离 {dist_mean:.4f}")
+    # 拆分方向向量，便于后续运算
+    x, y, z = dirs[:, 0:1], dirs[:, 1:2], dirs[:, 2:3]
 
-    def _snapshot_initial(self, model):
-        """在第一次调用时快照初始参数"""
-        if self._initial_means is None:
-            self._initial_means = model.means.detach().clone()
-            self._initial_scales = torch.exp(model.scales.detach()).clone()
-            # SH 模型：用 DC 分量计算初始颜色
-            self._initial_colors = (SH_C0 * model.sh_coeffs[:, 0].detach() + 0.5).clamp(0, 1).clone()
+    # ==================== 第 1 阶 (l=1, m=-1, 0, 1) ====================
+    if deg > 0:
+        # 运算: SH_C1 * ( -y*c1 + z*c2 - x*c3 )
+        # 索引对应: idx=1(-y), idx=2(z), idx=3(-x)
+        # SH_C1 ≈ 0.48860251 (sqrt(3/(4*pi)))
+        # 物理意义: 线性渐变。捕捉平滑的明暗过渡。
+        #   - idx=1 (-y) : 沿Y轴方向（上下）的明暗变化（如顶光照明）。
+        #   - idx=2 (z)  : 沿Z轴（前后/视线方向）的变化。
+        #   - idx=3 (-x) : 沿X轴方向（左右）的明暗变化。
+        # 直观感受: 让球体看起来有立体感，亮面与暗面平滑过渡。
+        result = result + SH_C1 * (-y * sh_coeffs[:, 1] + z * sh_coeffs[:, 2] - x * sh_coeffs[:, 3])
 
-    def log_model_params(self, model, step=0, tag="Training"):
-        """监控高斯点的物理状态 → 写入 model_states.md"""
-        self._snapshot_initial(model)
+    # ==================== 第 2 阶 (l=2, m=-2, -1, 0, 1, 2) ====================
+    if deg > 1:
+        # 预计算二次项，提升运算效率
+        xx, yy, zz = x * x, y * y, z * z
+        xy, yz, xz = x * y, y * z, x * z
 
-        means = model.means.detach()
-        scales = torch.exp(model.scales.detach())
-        opacity = torch.sigmoid(model.opacity.detach())
-        colors = (SH_C0 * model.sh_coeffs[:, 0].detach() + 0.5).clamp(0, 1)
+        # 运算: 5个二次基函数的加权和，对应索引 idx=4 ~ 8
+        # 物理意义: 开始表现“各向异性”和“光泽感”。
+        #   - idx=4 (xy)   : 正相关于 x*y。关注对角方向。
+        #         如果这个系数为正，斜着看物体时颜色会变亮/变暗。
+        #   - idx=5 (yz)   : 正相关于 y*z。关注垂直与深度方向的对角。
+        #   - idx=6 (2zz-xx-yy) : 沿Z轴的拉伸/压缩。
+        #         若为正，正面看向物体（Z方向）颜色突出；侧面看则弱化。
+        #   - idx=7 (xz)   : 正相关于 x*z。
+        #   - idx=8 (xx-yy) : 正相关于 (x^2 - y^2)。分辨水平 vs 垂直方向。
+        #         如果为正，水平方向（左右看）比垂直方向（上下看）更亮。
+        result = result + \
+                 SH_C2[0] * xy * sh_coeffs[:, 4] + \
+                 SH_C2[1] * yz * sh_coeffs[:, 5] + \
+                 SH_C2[2] * (2.0 * zz - xx - yy) * sh_coeffs[:, 6] + \
+                 SH_C2[3] * xz * sh_coeffs[:, 7] + \
+                 SH_C2[4] * (xx - yy) * sh_coeffs[:, 8]
 
-        # 椭球形状
-        scale_ratio = scales.max(dim=-1)[0] / (scales.min(dim=-1)[0] + 1e-8)
-        n_sphere = (scale_ratio < 1.5).sum().item()
-        n_ellipsoid = ((scale_ratio >= 1.5) & (scale_ratio < 3.0)).sum().item()
-        n_needle = (scale_ratio >= 3.0).sum().item()
+    # ==================== 第 3 阶 (l=3, m=-3 ... 3) ====================
+    if deg > 2:
+        # 运算: 7个三次基函数的加权和，对应索引 idx=9 ~ 15
+        # 物理意义: 捕捉极其精细的高光闪烁、复杂金属拉丝纹路。
+        #   - idx=9  : y*(3xx-yy)     -> 沿Y轴的三次扭曲光泽
+        #   - idx=10 : xy*z           -> 空间对角的三次耦合
+        #   - idx=11 : y*(4zz-xx-yy)  -> 垂直方向的高级光泽衰减
+        #   - idx=12 : z*(2zz-3xx-3yy)-> 深度方向的非线性高光
+        #   - idx=13 : x*(4zz-xx-yy)  -> 水平方向的高级光泽衰减
+        #   - idx=14 : z*(xx-yy)      -> 水平/垂直与深度的混合干涉
+        #   - idx=15 : x*(xx-3yy)     -> 沿X轴的三次扭曲光泽
+        # 直观感受: 让物体出现“随角度闪烁”的锐利高光（如抛光金属）。
+        result = result + \
+                 SH_C3[0] * y * (3.0 * xx - yy) * sh_coeffs[:, 9] + \
+                 SH_C3[1] * xy * z * sh_coeffs[:, 10] + \
+                 SH_C3[2] * y * (4.0 * zz - xx - yy) * sh_coeffs[:, 11] + \
+                 SH_C3[3] * z * (2.0 * zz - 3.0 * xx - 3.0 * yy) * sh_coeffs[:, 12] + \
+                 SH_C3[4] * x * (4.0 * zz - xx - yy) * sh_coeffs[:, 13] + \
+                 SH_C3[5] * z * (xx - yy) * sh_coeffs[:, 14] + \
+                 SH_C3[6] * x * (xx - 3.0 * yy) * sh_coeffs[:, 15]
 
-        # 尺度分布
-        scale_mean = scales.mean().item()
-        scale_max = scales.max().item()
-        scale_std = scales.std().item()
-        n_large = (scales.mean(dim=-1) > 0.02).sum().item()
-        n_tiny = (scales.mean(dim=-1) < 0.003).sum().item()
+    return result
 
-        # 透明度
-        n_visible = (opacity.squeeze() > 0.1).sum().item()
-        n_opaque = (opacity.squeeze() > 0.8).sum().item()
-        n_transparent = (opacity.squeeze() < 0.05).sum().item()
 
-        # 位置变化
-        if self._initial_means is not None and len(means) == len(self._initial_means):
-            drift = (means - self._initial_means.to(means.device)).norm(dim=-1)
-            drift_mean, drift_max = drift.mean().item(), drift.max().item()
+def rgb_to_sh0(rgb):
+    """将 [0,1] RGB 转为 0 阶 SH 系数的 DC 分量"""
+    return (rgb - 0.5) / SH_C0
+
+
+class GaussianModel(nn.Module):
+
+    def __init__(self, fx, fy, num_points=2000, radius=1.5, sh_degree=3, pcd=None):
+        super().__init__()
+
+        self.fx = fx
+        self.fy = fy
+
+        self.sh_degree = sh_degree          # 最终目标阶数
+        self.active_sh_degree = 0           # 渐进激活：训练初期只用 0 阶
+        self.n_sh_coeffs = (sh_degree + 1) ** 2
+        self.radius = radius
+
+        if pcd is not None:
+            means, colors_raw = pcd
+            # sh存放了高斯球的SH系数，第0阶为RGB(3维，取值[0, 1])通过固定因子缩放得到，高阶留到训练时慢慢学。
+            sh = torch.zeros(means.shape[0], self.n_sh_coeffs, 3)
+            sh[:, 0, :] = rgb_to_sh0(colors_raw)
         else:
-            drift_mean = drift_max = -1.0
+            means = torch.rand(num_points, 3) * 2 - 1
+            sh = torch.zeros(num_points, self.n_sh_coeffs, 3)
 
-        # 颜色变化
-        if self._initial_colors is not None and len(colors) == len(self._initial_colors):
-            color_change = (colors - self._initial_colors.to(colors.device)).abs().mean().item()
-        else:
-            color_change = -1.0
+        self.num_points = means.shape[0]
 
-        # Scale 变化
-        if self._initial_scales is not None and len(scales) == len(self._initial_scales):
-            scale_change = (scales - self._initial_scales.to(scales.device)).abs().mean().item()
-        else:
-            scale_change = -1.0
+        self.gauss_params = nn.ParameterDict({
+            # means: 高斯球在3D世界空间的中心坐标，shape=[N, 3]
+            "means": nn.Parameter(means),
+            # scales: 高斯椭球在 X、Y、Z三个方向上的半径，shape=[N, 3]，设定为对数尺度方便使用的时候用exp转为正数
+            "scales": nn.Parameter(torch.log(torch.ones(means.shape[0], 3) * 0.003 + torch.rand(means.shape[0], 3) * 0.002)),
+            # rotations: 每个高斯椭球在空间中的朝向，即单位四元数
+            "rotations": nn.Parameter(torch.tile(torch.tensor([1.0, 0, 0, 0]), (means.shape[0], 1))),
+            # opacities：高斯球对最终渲染像素的贡献权重，范围在 0~1 之间，shape=[N, ]
+            "opacities": nn.Parameter(torch.ones(means.shape[0], 1) * (-2.0)),  # sigmoid(-2) ≈ 0.12
+            # sh_coeffs：颜色随观察方向变化的球谐系数，shape=[N, n_sh_coeffs, 3]
+            "sh_coeffs": nn.Parameter(sh),
+        })
 
-        # 写入详情文件
-        block = f"## Step {step} [{tag}]\n" \
-                f"| 指标 | 值 |\n| :--- | :--- |\n" \
-                f"| 点数 | {len(means)} |\n" \
-                f"| 位置范围 | {self._format_list(means.min(0)[0].tolist())} ~ {self._format_list(means.max(0)[0].tolist())} |\n" \
-                f"| Scale mean/std/max | {scale_mean:.5f} / {scale_std:.5f} / {scale_max:.5f} |\n" \
-                f"| 大点(>0.02) / 小点(<0.003) | {n_large} ({n_large/len(means)*100:.1f}%) / {n_tiny} ({n_tiny/len(means)*100:.1f}%) |\n" \
-                f"| 形状 球/椭球/针 | {n_sphere} / {n_ellipsoid} / {n_needle} |\n" \
-                f"| Opacity mean | {opacity.mean().item():.4f} |\n" \
-                f"| 可见/不透明/透明 | {n_visible} / {n_opaque} / {n_transparent} |\n" \
-                f"| 颜色 RGB | {self._format_list(colors.mean(0).tolist())} |\n" \
-                f"| 位置漂移 mean/max | {drift_mean:.5f} / {drift_max:.5f} |\n" \
-                f"| 颜色变化 | {color_change:.5f} |\n" \
-                f"| 缩放变化 | {scale_change:.5f} |\n\n"
+    @property
+    def means(self):
+        return self.gauss_params["means"]
 
-        with open(self.detail_path, "a") as f:
-            f.write(block)
+    @property
+    def scales(self):
+        return self.gauss_params["scales"]
 
-        # 同时在汇总表追加一行紧凑摘要（不打断表格）
-        summary_row = f"| {step} | {len(means)} | {scale_mean:.4f} | {scale_max:.4f} | " \
-                      f"{n_large} | {opacity.mean().item():.3f} | " \
-                      f"{drift_mean:.4f} | {scale_change:.5f} |\n"
-        with open(self.summary_path, "a") as f:
-            f.write(summary_row)
+    @property
+    def rotations(self):
+        return self.gauss_params["rotations"]
 
-        # 告警
-        if n_large > len(means) * 0.1:
-            print(f"⚠️ [Step {step}] {n_large} 个大点 (>10%)，可能光晕")
-        if scale_max > 0.025:
-            print(f"⚠️ [Step {step}] Scale Max={scale_max:.4f}，光晕风险")
+    @property
+    def opacity(self):
+        return self.gauss_params["opacities"]
 
-    def evaluate_and_analyze(self, step, pred, gt, current_lr):
-        """渲染质量评测 → 写入 summary.md 的连续表格"""
-        pred_np = pred.detach().cpu().numpy().clip(0, 1)
-        gt_np = gt.detach().cpu().numpy()
+    @property
+    def sh_coeffs(self):
+        return self.gauss_params["sh_coeffs"]
 
-        # 核心指标
-        mse = np.mean((pred_np - gt_np) ** 2)
-        psnr = -10. * np.log10(mse + 1e-10)
-        ssim_val = ssim_func(gt_np, pred_np, channel_axis=-1, data_range=1.0)
+    def get_scaling(self):
+        return torch.exp(self.scales)
 
-        # 误差
-        error_map = np.abs(pred_np - gt_np).mean(axis=-1)
-        max_err = np.max(error_map)
+    def get_rotation(self):
+        return torch.nn.functional.normalize(self.rotations)
 
-        # 覆盖率
-        coverage = (pred_np.sum(axis=-1) > 0.01).mean()
+    def get_opacity(self):
+        return torch.sigmoid(self.opacity)
 
-        # 写入汇总表（连续行，不被模型状态打断）
-        with open(self.summary_path, "a") as f:
-            if not self._table_started:
-                f.write("## 训练进度\n\n")
-                f.write("| Step | PSNR | SSIM | MaxErr | Coverage | LR | Points | ScaleAvg | ScaleMax | LargePts | OpacAvg | Drift | ScaleΔ |\n")
-                f.write("| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n")
-                self._table_started = True
-            # 这里先写渲染指标，模型状态指标由 log_model_params 补充
-            # 为了保持一行完整，我们在这里把两者合并
+    def get_color_from_sh(self, viewdirs):
+        # 用 active_sh_degree 而非 sh_degree，实现渐进激活
+        color = eval_sh(self.active_sh_degree, self.sh_coeffs, viewdirs)
+        return (color + 0.5).clamp(0.0, 1.0)
 
-        # 暂存本 step 的渲染指标，等 log_model_params 时一起写
-        self._pending_eval = {
-            "step": step,
-            "psnr": psnr,
-            "ssim": ssim_val,
-            "max_err": max_err,
-            "coverage": coverage,
-            "lr": current_lr,
+    def oneupSHdegree(self):
+        """每隔 1000 步调用一次，逐步开放更高阶 SH，论文标准做法"""
+        if self.active_sh_degree < self.sh_degree:
+            self.active_sh_degree += 1
+
+    def forward(self, camera_pos=None):
+        result = {
+            "means": self.means,
+            "scales": self.get_scaling(),
+            "rotations": self.get_rotation(),
+            "opacity": self.get_opacity(),
+            # 原始叶节点参数引用，供 simple_rasterizer 手动写梯度用
+            "_raw_opacity":   self.gauss_params["opacities"],   # logit, leaf
+            "_raw_sh_coeffs": self.gauss_params["sh_coeffs"],   # leaf
+            "_raw_scales":    self.gauss_params["scales"],       # log-space, leaf
+            "_raw_rotations": self.gauss_params["rotations"],    # unnorm quat, leaf
         }
 
-        # 可视化
-        fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-        axes[0].imshow(gt_np)
-        axes[0].set_title("Ground Truth")
-        axes[1].imshow(pred_np)
-        axes[1].set_title(f"Rendered (PSNR: {psnr:.2f})")
-        im = axes[2].imshow(error_map, cmap='jet')
-        axes[2].set_title(f"Error (mean: {np.mean(error_map):.4f})")
-        plt.colorbar(im, ax=axes[2], fraction=0.046, pad=0.04)
-        for ax in axes: ax.axis('off')
-        save_path = os.path.join(self.vis_dir, f"step_{step:04d}.png")
-        plt.savefig(save_path, bbox_inches='tight', dpi=100)
-        plt.close(fig)
-
-        return psnr, ssim_val
-
-    def log_combined(self, model, step, pred, gt, current_lr, tag="Training"):
-        """一站式调用：评测 + 模型状态，输出为汇总表的一行 + 详情的一个 block"""
-        self._snapshot_initial(model)
-
-        # --- 渲染指标 ---
-        pred_np = pred.detach().cpu().numpy().clip(0, 1)
-        gt_np = gt.detach().cpu().numpy()
-        mse = np.mean((pred_np - gt_np) ** 2)
-        psnr = -10. * np.log10(mse + 1e-10)
-        ssim_val = ssim_func(gt_np, pred_np, channel_axis=-1, data_range=1.0)
-        error_map = np.abs(pred_np - gt_np).mean(axis=-1)
-        max_err = np.max(error_map)
-        coverage = (pred_np.sum(axis=-1) > 0.01).mean()
-
-        # --- 模型指标 ---
-        means = model.means.detach()
-        scales = torch.exp(model.scales.detach())
-        opacity = torch.sigmoid(model.opacity.detach())
-        colors = (SH_C0 * model.sh_coeffs[:, 0].detach() + 0.5).clamp(0, 1)
-
-        scale_mean = scales.mean().item()
-        scale_max = scales.max().item()
-        scale_std = scales.std().item()
-        n_large = (scales.mean(dim=-1) > 0.02).sum().item()
-        n_tiny = (scales.mean(dim=-1) < 0.003).sum().item()
-
-        scale_ratio = scales.max(dim=-1)[0] / (scales.min(dim=-1)[0] + 1e-8)
-        n_sphere = (scale_ratio < 1.5).sum().item()
-        n_ellipsoid = ((scale_ratio >= 1.5) & (scale_ratio < 3.0)).sum().item()
-        n_needle = (scale_ratio >= 3.0).sum().item()
-
-        n_visible = (opacity.squeeze() > 0.1).sum().item()
-        n_opaque = (opacity.squeeze() > 0.8).sum().item()
-        n_transparent = (opacity.squeeze() < 0.05).sum().item()
-
-        if self._initial_means is not None and len(means) == len(self._initial_means):
-            drift = (means - self._initial_means.to(means.device)).norm(dim=-1)
-            drift_mean, drift_max = drift.mean().item(), drift.max().item()
+        if camera_pos is not None:
+            with torch.no_grad():
+                viewdirs = camera_pos.unsqueeze(0) - self.means.detach()
+                viewdirs = viewdirs / (viewdirs.norm(dim=-1, keepdim=True) + 1e-8)
+            result["colors"] = self.get_color_from_sh(viewdirs)
         else:
-            drift_mean = drift_max = -1.0
+            result["colors"] = (SH_C0 * self.sh_coeffs[:, 0] + 0.5).clamp(0.0, 1.0)
 
-        if self._initial_colors is not None and len(colors) == len(self._initial_colors):
-            color_change = (colors - self._initial_colors.to(colors.device)).abs().mean().item()
+        return result
+
+    def get_optimizer_groups(self):
+        """
+        返回论文推荐的绝对学习率配置
+        注意：这里使用绝对学习率，不依赖外部 lr 参数
+        """
+        return [
+            {'params': [self.gauss_params["means"]], 'lr': 0.00016, 'name': 'means'},
+            {'params': [self.gauss_params["sh_coeffs"]], 'lr': 0.0025, 'name': 'sh_coeffs'},
+            {'params': [self.gauss_params["opacities"]], 'lr': 0.05, 'name': 'opacities'},
+            {'params': [self.gauss_params["scales"]], 'lr': 0.005, 'name': 'scales'},
+            {'params': [self.gauss_params["rotations"]], 'lr': 0.001, 'name': 'rotations'},
+        ]
+
+    @torch.no_grad()
+    def apply_constraints(self):
+        # scale 上限设为 radius * 0.1（与 strategy 的 max_scale=radius*0.1 对齐）。
+        # 注意：split 阈值 = radius * 0.01，apply_constraints 的上限必须 > split 阈值，
+        # 否则所有点永远被压在 split 阈值以下，split 条件（scale > split_threshold）
+        # 永远无法触发，点数无法突破。
+        max_log_scale = np.log(self.radius * 0.1)   # 0.1 * radius（与 max_scale 对齐）
+        self.gauss_params["scales"].clamp_(max=max_log_scale)
+        # 约束不能偏离中心太远
+        limit = self.radius * 1.5  # 论文用 scene_extent，比之前的 2.0 更严格
+        self.gauss_params["means"].clamp_(-limit, limit)
+
+    @torch.no_grad()
+    def reset_opacity(self):
+        """透明度重置：强制所有点重新证明自己的存在价值"""
+        # sigmoid(-4.6) ≈ 0.01
+        self.gauss_params["opacities"].fill_(-4.6)
+
+    @staticmethod
+    def compute_screen_space_gradient(means, means_grad, c2w, fx, fy, eps=1e-6):
+        """
+        将 3D 世界空间的位置梯度，映射到 2D 图像空间的像素梯度。
+        这是解决"近大远小"增密不公平问题的核心数学变换。
+
+        Args:
+            means (torch.Tensor): 高斯球的 3D 中心坐标，形状 [N, 3]。
+            means_grad (torch.Tensor): means 对应的梯度，形状 [N, 3]。
+            c2w (torch.Tensor): 当前相机的 3x4 或 4x4 外参矩阵（相机到世界）。
+            fx, fy (float): 内参焦距（像素单位）。
+            eps (float): 防止深度除零的小常数。
+
+        Returns:
+            torch.Tensor: 每个高斯球在屏幕上对应的 2D 梯度模长，形状 [N]。
+        """
+
+        # ==================== 第 1 步：将 3D 点转到相机坐标系 ====================
+        # 提取旋转 R 和平移 T（世界坐标系到相机坐标系）
+        # 注意：传入的 c2w 是“相机→世界”，所以世界→相机需要取逆矩阵。
+        if c2w.shape == (3, 4):
+            R_w2c = c2w[:3, :3].T  # 旋转矩阵的逆 = 转置
+            t_w2c = -R_w2c @ c2w[:3, 3:4]  # t_c2w = -R_w2c @ t_w2c
+        elif c2w.shape == (4, 4):
+            R_w2c = c2w[:3, :3].T
+            t_w2c = -R_w2c @ c2w[:3, 3:4]
         else:
-            color_change = -1.0
+            raise ValueError(f"c2w 矩阵形状 {c2w.shape} 不合法，应为 (3,4) 或 (4,4)")
 
-        if self._initial_scales is not None and len(scales) == len(self._initial_scales):
-            scale_change = (scales - self._initial_scales.to(scales.device)).abs().mean().item()
+        # 做线性变换：P_cam = R_w2c @ P_world + t_w2c
+        cam_xyz = means @ R_w2c.T + t_w2c.squeeze(1)  # 形状 [N, 3]
+        X, Y, Z = cam_xyz[:, 0], cam_xyz[:, 1], cam_xyz[:, 2]
+        Z = torch.clamp(Z, min=eps)  # 避免除以 0
+
+        # ==================== 第 2 步：计算透视投影的雅可比矩阵 ====================
+        # 针孔投影方程：u = fx * X/Z + cx,   v = fy * Y/Z + cy
+        # 雅可比 J (2x3) 表示 3D 点移动一点点，像素坐标移动多少：
+        #   du/dX = fx/Z,   du/dY = 0,      du/dZ = -fx*X/Z^2
+        #   dv/dX = 0,      dv/dY = fy/Z,   dv/dZ = -fy*Y/Z^2
+        grad_x, grad_y, grad_z = means_grad[:, 0], means_grad[:, 1], means_grad[:, 2]
+
+        # 将 3D 梯度映射到 2D 像素梯度
+        grad_u = fx * (grad_x / Z - grad_z * X / (Z ** 2))
+        grad_v = fy * (grad_y / Z - grad_z * Y / (Z ** 2))
+
+        # ==================== 第 3 步：返回 2D 梯度的模长 ====================
+        # 取 (du, dv) 的 L2 范数，作为判断“该点是否欠拟合”的最终指标
+        grad_2d_norm = torch.norm(torch.stack([grad_u, grad_v], dim=-1), dim=-1)
+        return grad_2d_norm
+
+    @torch.no_grad()
+    def update_densification_stats(self, viewspace_points, image_hw=None):
+        """
+        从 gsplat absgrad=True 模式中累积 2D 梯度统计，用于致密化判断。
+        viewspace_points: info["means2d"]，形状 [1, N, 2]，其 .absgrad 由 gsplat 在 backward 时填充。
+        注意：必须在 loss.backward() 之后调用（此时 absgrad 已被填充）。
+
+        image_hw: (H, W)，用于将 absgrad 从 loss.mean() 缩减后的量级还原到像素尺度。
+        gsplat absgrad 的量级 ≈ pixel_grad / (H * W * C)，乘回去后与原论文阈值（像素空间）一致。
+        """
+        if viewspace_points is None:
+            return
+        # gsplat absgrad 模式：梯度累积在 .absgrad 属性上，形状 [1, N, 2]
+        if hasattr(viewspace_points, "absgrad") and viewspace_points.absgrad is not None:
+            grad = viewspace_points.absgrad.squeeze(0)  # [N, 2]
+            # 还原到像素空间量级：loss 用 mean 归约，absgrad 被 H*W*3 缩小了
+            if image_hw is not None:
+                H, W = image_hw
+                grad = grad * (H * W * 3)
+            grad_norm = grad.norm(dim=-1)               # [N]
+        elif viewspace_points.grad is not None:
+            # 兼容 retain_grad 旧模式（梯度已经是像素空间量级）
+            grad = viewspace_points.grad.squeeze(0)
+            grad_norm = grad.norm(dim=-1)
         else:
-            scale_change = -1.0
+            return
 
-        # --- 写汇总表（一行包含全部信息，连续不打断）---
-        with open(self.summary_path, "a") as f:
-            if not self._table_started:
-                f.write("## 训练进度\n\n")
-                f.write("| Step | PSNR | SSIM | Coverage | Points | ScaleAvg | ScaleMax | Large | Opacity | Drift | ColorΔ | ScaleΔ | LR |\n")
-                f.write("| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :--- |\n")
-                self._table_started = True
-            f.write(f"| {step} | {psnr:.2f} | {ssim_val:.4f} | {coverage:.3f} | {len(means)} "
-                    f"| {scale_mean:.5f} | {scale_max:.5f} | {n_large} | {opacity.mean().item():.3f} "
-                    f"| {drift_mean:.4f} | {color_change:.4f} | {scale_change:.5f} | {current_lr:.2e} |\n")
+        if not hasattr(self, "_grad_accum"):
+            self._grad_accum = torch.zeros(self.num_points, device=grad_norm.device)
+            self._grad_count = torch.zeros(self.num_points, device=grad_norm.device)
 
-        # --- 写详情 block ---
-        block = f"## Step {step}\n" \
-                f"- PSNR: {psnr:.2f} | SSIM: {ssim_val:.4f} | Coverage: {coverage:.3f}\n" \
-                f"- Scale: mean={scale_mean:.5f}, std={scale_std:.5f}, max={scale_max:.5f}\n" \
-                f"- 大点(>0.02): {n_large} ({n_large/len(means)*100:.1f}%) | 小点(<0.003): {n_tiny} ({n_tiny/len(means)*100:.1f}%)\n" \
-                f"- 形状: 球={n_sphere} 椭球={n_ellipsoid} 针={n_needle}\n" \
-                f"- Opacity: mean={opacity.mean().item():.4f} | 可见={n_visible} 不透明={n_opaque} 透明={n_transparent}\n" \
-                f"- 漂移: mean={drift_mean:.5f} max={drift_max:.5f}\n" \
-                f"- 颜色变化: {color_change:.5f} | 缩放变化: {scale_change:.5f}\n\n"
+        n = min(grad_norm.shape[0], self.num_points)
+        self._grad_accum[:n] += grad_norm[:n]
+        self._grad_count[:n] += 1
 
-        with open(self.detail_path, "a") as f:
-            f.write(block)
+    @torch.no_grad()
+    def densify_and_prune(self, optimizer, grad_threshold=0.0002, min_opacity=0.005, max_scale=None, c2w=None):
+        """
+        自适应密度控制（选项A：简洁安全版）
+        - 使用屏幕空间梯度判断增密（精准解决近大远小）
+        - 直接重建优化器，丢弃旧动量（避免复杂的索引映射Bug）
+        - 彻底清理旧优化器，防止显存泄漏
+        """
+        # ==================== 1. 前置检查 ====================
+        # 优先使用 absgrad 累积量（来自 update_densification_stats），
+        # 其次回退到单帧 means.grad（兼容旧模式）
+        has_absgrad = hasattr(self, "_grad_accum") and self._grad_count.sum() > 0
+        if not has_absgrad and self.means.grad is None:
+            return optimizer
 
-        # --- 可视化 ---
-        fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-        axes[0].imshow(gt_np)
-        axes[0].set_title("Ground Truth")
-        axes[1].imshow(pred_np)
-        axes[1].set_title(f"Rendered (PSNR: {psnr:.2f})")
-        im = axes[2].imshow(error_map, cmap='jet')
-        axes[2].set_title(f"Error (mean: {np.mean(error_map):.4f})")
-        plt.colorbar(im, ax=axes[2], fraction=0.046, pad=0.04)
-        for ax in axes: ax.axis('off')
-        save_path = os.path.join(self.vis_dir, f"step_{step:04d}.png")
-        plt.savefig(save_path, bbox_inches='tight', dpi=100)
-        plt.close(fig)
+        # ==================== 2. 获取屏幕空间梯度 ====================
+        if has_absgrad:
+            # absgrad 模式：直接用累积的平均 2D 梯度范数，已经是屏幕空间，无需再投影
+            count = self._grad_count.clamp(min=1)
+            grads = self._grad_accum / count  # [N] 平均 2D 梯度范数
+            # 用完后重置累积量
+            self._grad_accum.zero_()
+            self._grad_count.zero_()
+        else:
+            # 回退：用 means.grad 通过雅可比矩阵投影到屏幕空间
+            grads = self.compute_screen_space_gradient(
+                self.gauss_params["means"],
+                self.gauss_params["means"].grad,
+                c2w,
+                self.fx,
+                self.fy,
+            )
 
-        # 告警
-        if n_large > len(means) * 0.1:
-            print(f"⚠️ [Step {step}] {n_large} 个大点 (>10%)，光晕风险")
-        if scale_max > 0.025:
-            print(f"⚠️ [Step {step}] Scale Max={scale_max:.4f}，接近上限")
+        # ==================== 3. 生成增密与剪枝掩码 ====================
+        # 获取物理属性（注意：scales和opacities已经是经过 exp/sigmoid 还原的物理值）
+        scales = self.get_scaling()  # [N, 3]
+        opacities = self.get_opacity().squeeze()  # [N]
+        scale_max = scales.max(dim=-1).values  # [N] 最大轴半径（论文用 max 而非 mean）
 
-        return psnr, ssim_val
+        # 需要增密的点：屏幕空间梯度 > 阈值
+        need_densify = grads > grad_threshold
+
+        # Split（大点分裂）：梯度大 且 最大轴半径 > percent_dense * scene_extent
+        # 论文：percent_dense=0.01，scene_extent=radius
+        split_threshold = self.radius * 0.01
+        split_mask = need_densify & (scale_max > split_threshold)
+
+        # Clone（小点克隆）：梯度大 且 最大轴半径 <= 阈值
+        clone_mask = need_densify & (scale_max <= split_threshold)
+
+        # Prune（剪枝）：透明度太低 或 最大轴尺度超过限制
+        prune_mask = opacities < min_opacity
+        if max_scale is not None:
+            prune_mask = prune_mask | (scale_max > max_scale)
+
+        # ==================== 4. 如果没有变化，清空梯度后提前返回 ====================
+        if not (split_mask.any() or clone_mask.any() or prune_mask.any()):
+            # 清空梯度防止下一轮迭代重复触发（关键安全步骤）
+            for param in self.gauss_params.parameters():
+                if param.grad is not None:
+                    param.grad = None
+            return optimizer
+
+        # ==================== 5. 构造新的参数张量 ====================
+        new_params = {}
+        for name, param in self.gauss_params.items():
+            # 1) 保留未被剪枝的点
+            remain = param[~prune_mask]
+
+            # 2) 克隆的点直接复制
+            cloned = param[clone_mask]
+
+            # 3) 分裂的点复制一份，但尺度要缩小（物理半径除以 1.6）
+            split_src = param[split_mask]
+            if name == "scales":
+                # 因为 self.gauss_params 存的是 log(scale)，
+                # 所以 log(s) - log(1.6) 等价于物理尺度除以 1.6
+                split_src = split_src - np.log(1.6)
+
+            # 拼接顺序：[保留点, 克隆点, 分裂点]
+            new_params[name] = torch.cat([remain, cloned, split_src], dim=0)
+
+        # ==================== 6. 更新模型参数 ====================
+        self.gauss_params = nn.ParameterDict(new_params)
+        self.num_points = self.gauss_params["means"].shape[0]
+
+        # 点数变化后重置梯度累积量，尺寸对齐新 num_points
+        device = self.gauss_params["means"].device
+        self._grad_accum = torch.zeros(self.num_points, device=device)
+        self._grad_count = torch.zeros(self.num_points, device=device)
+
+        # ==================== 7. 选项A：彻底销毁旧优化器 + 重建新优化器 ====================
+        # 7.1 将旧优化器中所有参数的梯度置 None（释放梯度显存）
+        optimizer.zero_grad(set_to_none=True)
+
+        # 7.2 清空旧优化器的内部状态字典（释放 Adam 动量的显存）
+        optimizer.state.clear()
+
+        # 7.3 手动删除旧优化器对象（在函数返回前强制释放引用）
+        del optimizer
+        torch.cuda.empty_cache()  # 强制释放 CUDA 碎片，防止新旧优化器状态同时驻留
+
+        # 7.4 使用新的参数组创建全新的 Adam 优化器
+        # 注意：新参数的 grad 默认为 None，所以新优化器的动量从零开始
+        new_optimizer = torch.optim.Adam(
+            self.get_optimizer_groups(),  # 这个方法需要返回 list of dict 参数组
+            eps=1e-15  # 3DGS 官方推荐值
+        )
+
+        return new_optimizer
+
+    @torch.no_grad()
+    def get_diagnostics(self, step=None, min_opacity=0.005):
+        """
+        返回训练诊断统计量字典
+        核心监控 4 项：op / ab_op / r / ab_r
+        """
+        diagnostics = {}
+        total = self.num_points
+        diagnostics['num_gaussians_total'] = total
+
+        # ================== 不透明度 ==================
+        opacities = self.get_opacity().squeeze()  # [N]
+
+        # top10% 不透明度均值（最不透明的 10% 椭球）
+        k_op = max(1, int(total * 0.1))
+        top10_op, _ = torch.topk(opacities, k_op)
+        diagnostics['op_top10_mean'] = top10_op.mean().item()
+        diagnostics['op_mean']       = opacities.mean().item()
+
+        # 不透明度过低的比例（< min_opacity 视为无效椭球）
+        diagnostics['ab_op'] = (opacities < min_opacity).float().mean().item()
+
+        # 保留旧字段兼容（logger 可能用到）
+        diagnostics['frac_opacity_below_0.05'] = (opacities < 0.05).float().mean().item()
+        diagnostics['effective_fraction'] = (opacities > min_opacity).float().mean().item()
+
+        # ================== 半径 ==================
+        scales = self.get_scaling()           # [N, 3] 物理尺度
+        avg_radius = scales.mean(dim=-1)      # [N] 每颗高斯的平均半径
+
+        # top10% 半径均值（最大的 10% 椭球）
+        k_r = max(1, int(total * 0.1))
+        top10_r, _ = torch.topk(avg_radius, k_r)
+        diagnostics['r_top10_mean'] = top10_r.mean().item()
+        diagnostics['r_mean']       = avg_radius.mean().item()
+
+        # 半径过大的比例（> apply_constraints 阈值 = radius * 0.01）
+        max_allowed = self.radius * 0.01
+        diagnostics['ab_r'] = (avg_radius > max_allowed).float().mean().item()
+
+        # 保留旧字段兼容
+        diagnostics['avg_radius_max'] = avg_radius.max().item()
+
+        # ================== 球谐系数 ==================
+        sh = self.gauss_params["sh_coeffs"]
+        diagnostics['sh_abs_mean'] = sh.abs().mean().item()
+        if self.sh_degree > 0:
+            dc   = sh[:, 0, :]
+            high = sh[:, 1:, :]
+            dc_norm   = dc.norm(dim=-1).mean().item()
+            high_norm = high.norm(dim=-1).mean().item()
+            diagnostics['sh_dc_norm']        = dc_norm
+            diagnostics['sh_high_norm']      = high_norm
+            diagnostics['sh_high_dc_ratio']  = high_norm / (dc_norm + 1e-8)
+        else:
+            diagnostics['sh_high_dc_ratio'] = 0.0
+
+        if step is not None:
+            diagnostics['step'] = step
+
+        return diagnostics
+
+    def save_model(self, path):
+        torch.save(self.state_dict(), path)
+
+    def load_model(self, path):
+        self.load_state_dict(torch.load(path))

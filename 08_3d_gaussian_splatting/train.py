@@ -116,7 +116,9 @@ def train(args):
         viewspace_points = gaussians.get("viewspace_points", None)
 
         # --- D. 密度策略 ---
-        optimizer = strategy.step(step, model, optimizer, c2w=c2w, viewspace_points=viewspace_points)
+        optimizer = strategy.step(step, model, optimizer, c2w=c2w,
+                                  viewspace_points=viewspace_points,
+                                  image_hw=(loader.H, loader.W))
 
         # 主动清理 gaussians 字典
         gaussians.clear()
