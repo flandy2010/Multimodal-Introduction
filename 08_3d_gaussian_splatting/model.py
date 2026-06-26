@@ -450,63 +450,57 @@ class GaussianModel(nn.Module):
     @torch.no_grad()
     def get_diagnostics(self, step=None, min_opacity=0.005):
         """
-        返回训练诊断统计量字典，对应监控清单 ②③④⑤
-        调用示例: stats = model.get_diagnostics(step=iteration)
+        返回训练诊断统计量字典
+        核心监控 4 项：op / ab_op / r / ab_r
         """
         diagnostics = {}
-
-        # ================== ② 高斯数量与密集化动态 ==================
         total = self.num_points
         diagnostics['num_gaussians_total'] = total
 
-        opacities = self.get_opacity().squeeze()          # [N] 物理透明度
-        effective = (opacities > min_opacity).sum().item()
-        diagnostics['num_gaussians_effective'] = effective
-        diagnostics['effective_fraction'] = effective / total if total > 0 else 0.0
+        # ================== 不透明度 ==================
+        opacities = self.get_opacity().squeeze()  # [N]
 
-        # ================== ③ 透明度分布 ==================
-        diagnostics['opacity_min'] = opacities.min().item()
-        diagnostics['opacity_max'] = opacities.max().item()
-        diagnostics['opacity_mean'] = opacities.mean().item()
-        diagnostics['opacity_median'] = opacities.median().item()
+        # top10% 不透明度均值（最不透明的 10% 椭球）
+        k_op = max(1, int(total * 0.1))
+        top10_op, _ = torch.topk(opacities, k_op)
+        diagnostics['op_top10_mean'] = top10_op.mean().item()
+        diagnostics['op_mean']       = opacities.mean().item()
 
-        # 分段占比
+        # 不透明度过低的比例（< min_opacity 视为无效椭球）
+        diagnostics['ab_op'] = (opacities < min_opacity).float().mean().item()
+
+        # 保留旧字段兼容（logger 可能用到）
         diagnostics['frac_opacity_below_0.05'] = (opacities < 0.05).float().mean().item()
-        diagnostics['frac_opacity_0.05_0.5']  = ((opacities >= 0.05) & (opacities < 0.5)).float().mean().item()
-        diagnostics['frac_opacity_0.5_0.95']  = ((opacities >= 0.5) & (opacities < 0.95)).float().mean().item()
-        diagnostics['frac_opacity_above_0.95']= (opacities >= 0.95).float().mean().item()
+        diagnostics['effective_fraction'] = (opacities > min_opacity).float().mean().item()
 
-        # ================== ④ 协方差与缩放 ==================
-        scales = self.get_scaling()                     # [N, 3] 物理尺度
-        # 各轴平均尺度与标准差
-        for i, axis in enumerate(['x','y','z']):
-            diagnostics[f'scale_mean_{axis}'] = scales[:, i].mean().item()
-            diagnostics[f'scale_std_{axis}']  = scales[:, i].std().item()
+        # ================== 半径 ==================
+        scales = self.get_scaling()           # [N, 3] 物理尺度
+        avg_radius = scales.mean(dim=-1)      # [N] 每颗高斯的平均半径
 
-        avg_radius = scales.mean(dim=-1)                # 每颗高斯的平均半径
-        diagnostics['avg_radius_mean']   = avg_radius.mean().item()
-        diagnostics['avg_radius_median'] = avg_radius.median().item()
-        diagnostics['avg_radius_max']    = avg_radius.max().item()
-        diagnostics['avg_radius_min']    = avg_radius.min().item()
+        # top10% 半径均值（最大的 10% 椭球）
+        k_r = max(1, int(total * 0.1))
+        top10_r, _ = torch.topk(avg_radius, k_r)
+        diagnostics['r_top10_mean'] = top10_r.mean().item()
+        diagnostics['r_mean']       = avg_radius.mean().item()
 
-        # 过大 / 过小尺度警告 (threshold 沿用 apply_constraints 中的 0.1*radius)
-        max_allowed = self.radius * 0.1
-        diagnostics['num_large_scale'] = (avg_radius > max_allowed).sum().item()
-        diagnostics['num_tiny_scale']  = (avg_radius < 1e-5).sum().item()
+        # 半径过大的比例（> apply_constraints 阈值 = radius * 0.01）
+        max_allowed = self.radius * 0.01
+        diagnostics['ab_r'] = (avg_radius > max_allowed).float().mean().item()
 
-        # ================== ⑤ 球谐系数统计 ==================
-        sh = self.gauss_params["sh_coeffs"]              # [N, n_sh, 3]
+        # 保留旧字段兼容
+        diagnostics['avg_radius_max'] = avg_radius.max().item()
+
+        # ================== 球谐系数 ==================
+        sh = self.gauss_params["sh_coeffs"]
         diagnostics['sh_abs_mean'] = sh.abs().mean().item()
-        diagnostics['sh_std']      = sh.std().item()
-
         if self.sh_degree > 0:
-            dc = sh[:, 0, :]                             # 0阶直流分量
-            high = sh[:, 1:, :]                          # 高阶系数
+            dc   = sh[:, 0, :]
+            high = sh[:, 1:, :]
             dc_norm   = dc.norm(dim=-1).mean().item()
             high_norm = high.norm(dim=-1).mean().item()
-            diagnostics['sh_dc_norm']   = dc_norm
-            diagnostics['sh_high_norm'] = high_norm
-            diagnostics['sh_high_dc_ratio'] = high_norm / (dc_norm + 1e-8)
+            diagnostics['sh_dc_norm']        = dc_norm
+            diagnostics['sh_high_norm']      = high_norm
+            diagnostics['sh_high_dc_ratio']  = high_norm / (dc_norm + 1e-8)
         else:
             diagnostics['sh_high_dc_ratio'] = 0.0
 

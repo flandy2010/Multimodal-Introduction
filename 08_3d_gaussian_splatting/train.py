@@ -129,15 +129,17 @@ def train(args):
         stats = model.get_diagnostics()
 
         pbar.set_postfix({
-            "Loss": f"{loss.item():.4f}",
-            "L1": f"{loss_l1.item():.4f}",
-            "Ls": f"{loss_ssim.item():.4f}",
-            "Pts": model.num_points,
-            'eff': f"{stats['effective_fraction']:.2f}",
-            'low_op': f"{stats['frac_opacity_below_0.05']:.2f}",
-            'max_r': f"{stats['avg_radius_max']:.3f}",
-            'SH': f"{model.active_sh_degree}/{model.sh_degree}",  # 渐进激活进度
-            'SH_hi': f"{stats['sh_high_dc_ratio']:.3f}"
+            "L1":    f"{loss_l1.item():.4f}",
+            "Pts":   model.num_points,
+            "SH":    f"{model.active_sh_degree}/{model.sh_degree}",
+            # op：top10% / 全量 不透明度均值
+            "op":    f"{stats['op_top10_mean']:.2f}/{stats['op_mean']:.2f}",
+            # ab_op：不透明度过低（< 0.005）的椭球比例
+            "ab_op": f"{stats['ab_op']:.2f}",
+            # r：top10% / 全量 平均半径均值
+            "r":     f"{stats['r_top10_mean']:.4f}/{stats['r_mean']:.4f}",
+            # ab_r：半径超过阈值（radius*0.01）的椭球比例
+            "ab_r":  f"{stats['ab_r']:.2f}",
         })
 
         if step % args.display_int == 0 or step == args.n_iters - 1:
