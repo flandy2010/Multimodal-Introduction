@@ -115,4 +115,4 @@ class GaussianStrategy:
         """论文标准 Loss: 0.8 * L1 + 0.2 * (1 - SSIM)"""
         loss_l1 = F.l1_loss(out_image, gt_image)
         loss_ssim = ssim_loss(out_image, gt_image)
-        return 0.8 * loss_l1 + 0.2 * loss_ssim
+        return loss_l1, loss_ssim

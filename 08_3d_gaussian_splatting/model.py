@@ -383,6 +383,74 @@ class GaussianModel(nn.Module):
 
         return new_optimizer
 
+    @torch.no_grad()
+    def get_diagnostics(self, step=None, min_opacity=0.005):
+        """
+        返回训练诊断统计量字典，对应监控清单 ②③④⑤
+        调用示例: stats = model.get_diagnostics(step=iteration)
+        """
+        diagnostics = {}
+
+        # ================== ② 高斯数量与密集化动态 ==================
+        total = self.num_points
+        diagnostics['num_gaussians_total'] = total
+
+        opacities = self.get_opacity().squeeze()          # [N] 物理透明度
+        effective = (opacities > min_opacity).sum().item()
+        diagnostics['num_gaussians_effective'] = effective
+        diagnostics['effective_fraction'] = effective / total if total > 0 else 0.0
+
+        # ================== ③ 透明度分布 ==================
+        diagnostics['opacity_min'] = opacities.min().item()
+        diagnostics['opacity_max'] = opacities.max().item()
+        diagnostics['opacity_mean'] = opacities.mean().item()
+        diagnostics['opacity_median'] = opacities.median().item()
+
+        # 分段占比
+        diagnostics['frac_opacity_below_0.05'] = (opacities < 0.05).float().mean().item()
+        diagnostics['frac_opacity_0.05_0.5']  = ((opacities >= 0.05) & (opacities < 0.5)).float().mean().item()
+        diagnostics['frac_opacity_0.5_0.95']  = ((opacities >= 0.5) & (opacities < 0.95)).float().mean().item()
+        diagnostics['frac_opacity_above_0.95']= (opacities >= 0.95).float().mean().item()
+
+        # ================== ④ 协方差与缩放 ==================
+        scales = self.get_scaling()                     # [N, 3] 物理尺度
+        # 各轴平均尺度与标准差
+        for i, axis in enumerate(['x','y','z']):
+            diagnostics[f'scale_mean_{axis}'] = scales[:, i].mean().item()
+            diagnostics[f'scale_std_{axis}']  = scales[:, i].std().item()
+
+        avg_radius = scales.mean(dim=-1)                # 每颗高斯的平均半径
+        diagnostics['avg_radius_mean']   = avg_radius.mean().item()
+        diagnostics['avg_radius_median'] = avg_radius.median().item()
+        diagnostics['avg_radius_max']    = avg_radius.max().item()
+        diagnostics['avg_radius_min']    = avg_radius.min().item()
+
+        # 过大 / 过小尺度警告 (threshold 沿用 apply_constraints 中的 0.1*radius)
+        max_allowed = self.radius * 0.1
+        diagnostics['num_large_scale'] = (avg_radius > max_allowed).sum().item()
+        diagnostics['num_tiny_scale']  = (avg_radius < 1e-5).sum().item()
+
+        # ================== ⑤ 球谐系数统计 ==================
+        sh = self.gauss_params["sh_coeffs"]              # [N, n_sh, 3]
+        diagnostics['sh_abs_mean'] = sh.abs().mean().item()
+        diagnostics['sh_std']      = sh.std().item()
+
+        if self.sh_degree > 0:
+            dc = sh[:, 0, :]                             # 0阶直流分量
+            high = sh[:, 1:, :]                          # 高阶系数
+            dc_norm   = dc.norm(dim=-1).mean().item()
+            high_norm = high.norm(dim=-1).mean().item()
+            diagnostics['sh_dc_norm']   = dc_norm
+            diagnostics['sh_high_norm'] = high_norm
+            diagnostics['sh_high_dc_ratio'] = high_norm / (dc_norm + 1e-8)
+        else:
+            diagnostics['sh_high_dc_ratio'] = 0.0
+
+        if step is not None:
+            diagnostics['step'] = step
+
+        return diagnostics
+
     def save_model(self, path):
         torch.save(self.state_dict(), path)
 

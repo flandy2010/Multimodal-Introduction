@@ -85,7 +85,8 @@ def train(args):
 
         # --- C. 损失 ---
         viewspace_points = gaussians.get("viewspace_points", None)
-        loss = strategy.get_loss(out_image, gt_image, model, step)
+        loss_l1, loss_ssim = strategy.get_loss(out_image, gt_image, model, step)
+        loss = 0.8 * loss_l1 + 0.1 * loss_ssim
 
         if loss.grad_fn is None:
             continue
@@ -101,14 +102,17 @@ def train(args):
         model.apply_constraints()
 
         # --- F. 日志 ---
-        loss_val = loss.item()
-        moving_avg_loss = loss_val if moving_avg_loss is None else ema_alpha * moving_avg_loss + (
-                    1 - ema_alpha) * loss_val
+        stats = model.get_diagnostics()
 
         pbar.set_postfix({
+            "Loss": f"{loss.item():.4f}",
+            "L1": f"{loss_l1.item():.4f}",
+            "Ls": f"{loss_ssim.item():.4f}",
             "Pts": model.num_points,
-            "Loss": f"{moving_avg_loss:.4f}",
-            "mLR": f"{means_lr:.2e}"
+            'eff': f"{stats['effective_fraction']:.2f}",  # 有效占比
+            'low_op': f"{stats['frac_opacity_below_0.05']:.2f}",  # 低透明度占比
+            'max_r': f"{stats['avg_radius_max']:.3f}",  # 最大尺度
+            'SH_hi': f"{stats['sh_high_dc_ratio']:.3f}"  # 高阶/直流比
         })
 
         if step % args.display_int == 0 or step == args.n_iters - 1:
@@ -127,7 +131,7 @@ def main():
     parser.add_argument("--exp_dir", type=str, default="./runs/gs_default")
 
     parser.add_argument("--factor", type=int, default=8, help="Image downscale factor")
-    parser.add_argument("--num_points", type=int, default=50000, help="Max initial points")
+    parser.add_argument("--num_points", type=int, default=15000, help="Max initial points")
     parser.add_argument("--max_points", type=int, default=1000000, help="Max total points")
     parser.add_argument("--n_iters", type=int, default=30000)
     parser.add_argument("--sh_degree", type=int, default=3, help="SH degree (0=DC, 3=full)")
