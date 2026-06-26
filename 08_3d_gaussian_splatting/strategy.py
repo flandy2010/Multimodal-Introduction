@@ -110,8 +110,30 @@ class GaussianStrategy:
 
         return optimizer
 
-    def get_loss(self, out_image, gt_image, model, step):
-        """论文标准 Loss: 0.8 * L1 + 0.2 * (1 - SSIM)"""
-        loss_l1 = F.l1_loss(out_image, gt_image)
+    def get_loss(self, out_image, gt_image, model, step, scale_reg=0.01, opacity_reg=0.01):
+        """
+        论文标准 Loss: 0.8 * L1 + 0.2 * (1 - SSIM)
+        + 正则化项（gsplat MCMCStrategy 默认值，对超大球有抑制作用）：
+          scale_reg:   惩罚过大的 scale（L1 正则），默认 0.01
+          opacity_reg: 惩罚非 0/1 的 opacity（熵正则），默认 0.01
+        设为 0 可完全关闭正则化。
+        """
+        loss_l1   = F.l1_loss(out_image, gt_image)
         loss_ssim = ssim_loss(out_image, gt_image)
-        return loss_l1, loss_ssim
+
+        loss = 0.8 * loss_l1 + 0.2 * loss_ssim
+
+        # scale 正则：L1 on exp(log_scales)，即物理尺度的均值，惩罚大球
+        if scale_reg > 0.0:
+            scales = model.get_scaling()                      # [N, 3] 物理尺度
+            loss_scale = scales.mean()
+            loss = loss + scale_reg * loss_scale
+
+        # opacity 正则：熵正则，鼓励 opacity 趋向 0 或 1（避免半透明大球积累）
+        if opacity_reg > 0.0:
+            opacities = model.get_opacity().squeeze()         # [N]
+            loss_opa = -(opacities * torch.log(opacities + 1e-8)
+                         + (1 - opacities) * torch.log(1 - opacities + 1e-8)).mean()
+            loss = loss + opacity_reg * loss_opa
+
+        return loss_l1, loss_ssim, loss

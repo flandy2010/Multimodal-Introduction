@@ -90,7 +90,8 @@ def train(args):
         raster_result = auto_rasterizer(gaussians, w2c, K, loader.H, loader.W,
                                         tile_size=args.tile_size,
                                         gt_image=gt_image,
-                                        loss_fn=None)  # simple路径内部直接用 L1-sum，loss_fn 不再需要
+                                        loss_fn=None,
+                                        radius_clip=args.radius_clip)
 
         # --- C. 损失 & Backward ---
         if isinstance(raster_result, tuple):
@@ -99,15 +100,19 @@ def train(args):
             out_image, loss_l1 = raster_result
             # SSIM 在 detach 图上计算（仅用于监控，不参与梯度）
             with torch.no_grad():
-                loss_ssim = strategy.get_loss(out_image, gt_image, model, step)[1]
+                loss_ssim = strategy.get_loss(out_image, gt_image, model, step,
+                                              scale_reg=0, opacity_reg=0)[1]
             loss = loss_l1  # 梯度已通过 tile backward 累积，这里仅作日志用
             if loss.grad_fn is not None:
                 pass  # 不再 backward
         else:
             # gsplat / mps 路径：正常 backward
             out_image = raster_result
-            loss_l1, loss_ssim = strategy.get_loss(out_image, gt_image, model, step)
-            loss = 0.8 * loss_l1 + 0.1 * loss_ssim
+            loss_l1, loss_ssim, loss = strategy.get_loss(
+                out_image, gt_image, model, step,
+                scale_reg=args.scale_reg,
+                opacity_reg=args.opacity_reg,
+            )
             if loss.grad_fn is None:
                 gaussians.clear()
                 continue
@@ -168,6 +173,12 @@ def main():
     parser.add_argument("--grad_threshold", type=float, default=0.0002, help="Densify grad threshold")
     parser.add_argument("--display_int", type=int, default=100)
     parser.add_argument("--device", type=str, default="auto")
+    parser.add_argument("--scale_reg", type=float, default=0.01,
+                        help="Scale regularization weight (gsplat MCMC default=0.01, 0=disable)")
+    parser.add_argument("--opacity_reg", type=float, default=0.01,
+                        help="Opacity entropy regularization weight (gsplat MCMC default=0.01, 0=disable)")
+    parser.add_argument("--radius_clip", type=float, default=0.0,
+                        help="gsplat radius_clip: skip Gaussians with 2D radius <= this (pixels). 0=disable")
 
     args = parser.parse_args()
     train(args)

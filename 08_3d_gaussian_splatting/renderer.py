@@ -27,7 +27,8 @@ except Exception:
     print("⚠️  gsplat CUDA 不可用，自动降级到 simple_rasterizer（MPS/CPU 模式）")
 
 
-def auto_rasterizer(gaussians, w2c, K, H, W, tile_size=16, gt_image=None, loss_fn=None):
+def auto_rasterizer(gaussians, w2c, K, H, W, tile_size=16, gt_image=None, loss_fn=None,
+                    radius_clip=0.0):
     """
     自动三路选择渲染后端：
     ┌─────────────────────────────────────────────────────────────────┐
@@ -36,13 +37,13 @@ def auto_rasterizer(gaussians, w2c, K, H, W, tile_size=16, gt_image=None, loss_f
     │  其他（CPU/CUDA无gsplat）→ simple_rasterizer（逐tile backward）  │
     └─────────────────────────────────────────────────────────────────┘
 
-    训练时（传入 gt_image + loss_fn）：
-      - gsplat 路径：返回 out_image（调用方自行 backward）
-      - simple 路径：内部逐 tile backward，返回 (out_image_detach, total_loss)
+    radius_clip: 传入 gsplat_rasterizer。像素单位，投影半径 ≤ 该值的球被跳过。
+      默认 0.0 = 不裁剪。MPS/simple 路径暂不支持此参数（忽略）。
     推理时：统一返回 out_image。
     """
     if _GSPLAT_AVAILABLE:
-        return gsplat_rasterizer(gaussians, w2c, K, H, W, tile_size=tile_size)
+        return gsplat_rasterizer(gaussians, w2c, K, H, W, tile_size=tile_size,
+                                 radius_clip=radius_clip)
     elif gaussians["means"].device.type == "mps":
         return mps_rasterizer(gaussians, w2c, K, H, W)
     else:
@@ -50,37 +51,40 @@ def auto_rasterizer(gaussians, w2c, K, H, W, tile_size=16, gt_image=None, loss_f
                                  gt_image=gt_image, loss_fn=loss_fn)
 
 
-def gsplat_rasterizer(gaussians, w2c, K, H, W, tile_size=16):
+def gsplat_rasterizer(gaussians, w2c, K, H, W, tile_size=16, radius_clip=0.0):
     """
     作为 simple_rasterizer 的直接替代品。
     gaussians: 一个字典或对象，包含 means, scales, quats, opacities, colors/shs
     w2c: [4, 4] 矩阵 (World-to-Camera)
     K: [3, 3] 矩阵 (Camera Intrinsics)
+    radius_clip: 屏幕空间 2D 半径（像素）下限裁剪。
+        投影半径 ≤ radius_clip 的 Gaussian 在光栅化时被跳过（不渲染、不产生梯度）。
+        注意：这是"下限"裁剪，用于跳过远处太小的球（加速大场景）。
+        本项目中我们额外用它来跳过投影过大的球（通过 max_radius_clip 实现上限裁剪）。
+        gsplat 官方 simple_trainer.py 训练时不使用 radius_clip（保持 0.0），
+        仅在 Viewer 中启用。这里保留接口，由调用方决定是否使用。
+        默认 0.0 = 不裁剪。
 
-    注意：gsplat CUDA kernel 的 tile_size 只支持 16 和 32（每 block 线程数 = tile_size²，
-    上限 1024），传入更大的值（如 64）会触发 cudaErrorInvalidConfiguration。
-    此处强制限制在安全值内，tile_size 参数仅对 simple/mps rasterizer 有意义。
+    注意：gsplat CUDA kernel 的 tile_size 只支持 16 和 32，
+    传入更大的值会触发 cudaErrorInvalidConfiguration，此处强制限制。
     """
     gsplat_tile_size = min(tile_size, 16)  # gsplat 只支持 16（及 32，但 16 最安全）
     # 1. 提取参数
     # 注意：model.forward 传入的 gaussians 中，scales/rotations/opacity/colors
     # 已经经过 exp/normalize/sigmoid/clamp 等激活，这里直接使用，不要重复激活。
-    means = gaussians["means"]                                         # [N, 3] 保留梯度
-    scales = gaussians["scales"]                                       # [N, 3] 已是物理尺度（exp 过）
-    quats = gaussians["rotations"]                                     # [N, 4] 已归一化
-    opacities = gaussians["opacity"].squeeze(-1)                       # [N]    已是 sigmoid 后的值
-    colors = gaussians["colors"]                                       # [N, 3]
+    means    = gaussians["means"]                     # [N, 3] 保留梯度
+    scales   = gaussians["scales"]                    # [N, 3] 已是物理尺度（exp 过）
+    quats    = gaussians["rotations"]                 # [N, 4] 已归一化
+    opacities = gaussians["opacity"].squeeze(-1)      # [N]    已是 sigmoid 后的值
+    colors   = gaussians["colors"]                    # [N, 3]
 
-    # 2. 构造 viewmat (gsplat 需要 [4, 4])
+    # 2. 构造 viewmat (gsplat 需要 [1, 4, 4])
     viewmat = w2c.view(-1, 4, 4)
-
     if len(K.shape) == 2:
         K = K.unsqueeze(0)
 
     # 3. 调用 gsplat 加速渲染
-    # render_colors: [H, W, 3]
-    # absgrad=True：让 gsplat 在 CUDA kernel 内部直接累积 |∇2D| 到 means2d.absgrad，
-    # 无需 retain_grad()，不会把渲染中间量 pin 在 PyTorch 计算图里，大幅节省显存。
+    # absgrad=True：在 CUDA kernel 内直接累积 |∇2D|，替代 retain_grad()，节省显存
     render_colors, render_alphas, info = _gsplat_rasterization(
         means=means,
         quats=quats,
@@ -92,7 +96,8 @@ def gsplat_rasterizer(gaussians, w2c, K, H, W, tile_size=16):
         width=W,
         height=H,
         tile_size=gsplat_tile_size,
-        absgrad=True,  # 官方推荐：用 absgrad 替代 retain_grad()
+        absgrad=True,
+        radius_clip=radius_clip,  # 像素单位，默认 0.0 = 不裁剪
     )
 
     # 把 means2d 存入 gaussians，strategy.step 通过 means2d.absgrad 读取梯度累积量，
