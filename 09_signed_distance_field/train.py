@@ -9,11 +9,81 @@ from dataloader import TinySDFDataset
 from logger import SDFLogger
 
 
+def compute_normals_autograd(sdf_net, flat_pts, chunk):
+    """
+    法线方式一（精确）：autograd 求 SDF 对坐标的梯度。
+    - 优点：数学精确，与 Eikonal 定义完全一致
+    - 缺点：每 chunk 需 retain_graph=True，多次 GPU-CPU 同步，P800 等旧卡较慢
+    - 适用：H20 等新卡，或需要精确法线的场景
+    """
+    sdf_list, feat_list, normal_list = [], [], []
+    for i in range(0, flat_pts.shape[0], chunk):
+        p = flat_pts[i:i + chunk].detach().requires_grad_(True)
+        with torch.enable_grad():
+            sdf_i, feat_i = sdf_net(p)
+            grad_i = torch.autograd.grad(
+                outputs=sdf_i, inputs=p,
+                grad_outputs=torch.ones_like(sdf_i),
+                create_graph=False, retain_graph=True, only_inputs=True
+            )[0]
+            normals_i = F.normalize(grad_i, p=2, dim=-1)
+        sdf_list.append(sdf_i)
+        feat_list.append(feat_i)
+        normal_list.append(normals_i.detach())
+    return (
+        torch.cat(sdf_list, 0),    # [N, 1] 带梯度
+        torch.cat(feat_list, 0),   # [N, W] 带梯度
+        torch.cat(normal_list, 0), # [N, 3] 已 detach
+    )
+
+
+def compute_normals_finite_diff(sdf_net, flat_pts, chunk, eps=1e-3):
+    """
+    法线方式二（近似）：有限差分，6 次 no_grad 前向近似梯度。
+    - 优点：无 autograd 计算图，无 GPU-CPU 同步，P800 等旧卡更快
+    - 缺点：精度略低（eps=1e-3 已足够，视觉差别极小）
+    - 适用：P800 等旧卡，或追求训练速度的场景
+    """
+    offsets = torch.eye(3, device=flat_pts.device) * eps  # [3, 3]
+    normal_list, feat_list = [], []
+    with torch.no_grad():
+        for i in range(0, flat_pts.shape[0], chunk):
+            p = flat_pts[i:i + chunk]
+            _, feat_i = sdf_net(p)
+            feat_list.append(feat_i)
+            grad_fd = []
+            for k in range(3):
+                sdf_pos, _ = sdf_net(p + offsets[k])
+                sdf_neg, _ = sdf_net(p - offsets[k])
+                grad_fd.append((sdf_pos - sdf_neg) / (2 * eps))
+            normals_i = F.normalize(torch.cat(grad_fd, dim=-1), p=2, dim=-1)
+            normal_list.append(normals_i)
+    normals_all = torch.cat(normal_list, 0)  # [N, 3]
+    feat_all = torch.cat(feat_list, 0)       # [N, W] 无梯度
+
+    # 带梯度的 SDF 单独算一次（feat 已 detach，只为 loss 反传）
+    sdf_list = []
+    for i in range(0, flat_pts.shape[0], chunk):
+        p = flat_pts[i:i + chunk]
+        sdf_i, _ = sdf_net(p)
+        sdf_list.append(sdf_i)
+    return (
+        torch.cat(sdf_list, 0),  # [N, 1] 带梯度
+        feat_all,                # [N, W] 无梯度（传给 color_net 够用）
+        normals_all,             # [N, 3] 无梯度
+    )
+
+
 def render_rays_sdf(sdf_net, color_net, rays_o, rays_d, near, far, n_samples, s_val,
-                    use_random_sample=False, compute_eikonal=True):
+                    use_random_sample=False, compute_eikonal=True,
+                    normal_mode="autograd"):
     """
     SDF 体渲染（对标 06 NeRF 的 render_rays，核心区别是 SDF→alpha 的转换 + Eikonal Loss）
 
+    参数:
+        normal_mode: 法线计算方式
+            "autograd"    - 精确梯度法（H20 等新卡推荐，数学精确）
+            "finite_diff" - 有限差分法（P800 等旧卡推荐，速度快）
     返回: rgb_pred [H, W, 3], loss_eikonal (标量，evaluate 时为 0)
     """
     t_vals = torch.linspace(near, far, n_samples).to(rays_o.device)
@@ -42,36 +112,22 @@ def render_rays_sdf(sdf_net, color_net, rays_o, rays_d, near, far, n_samples, s_
     flat_pts = pts.reshape(-1, 3)
     flat_dirs = dirs_expanded.reshape(-1, 3)
 
-    # --- 主干前向（不带梯度追踪，快速）---
+    # --- 主干前向：SDF + feature + 法线 ---
     chunk = 1024 * 32
-    sdf_list, rgb_list = [], []
+    if normal_mode == "finite_diff":
+        sdf_all, feat_all, normals_all = compute_normals_finite_diff(sdf_net, flat_pts, chunk)
+    else:  # "autograd"（默认，精确）
+        sdf_all, feat_all, normals_all = compute_normals_autograd(sdf_net, flat_pts, chunk)
+
+    # 颜色网络（feature 和法线均已 detach，避免颜色梯度影响几何）
+    rgb_list = []
     for i in range(0, flat_pts.shape[0], chunk):
         p = flat_pts[i:i + chunk]
         d = flat_dirs[i:i + chunk]
-
-        # 1. 开启梯度追踪以计算法线
-        p.requires_grad_(True)
-        with torch.enable_grad():
-            sdf_i, feat_i = sdf_net(p)
-
-            # # 2. 计算梯度（法线）
-            grad_i = torch.autograd.grad(
-                outputs=sdf_i,
-                inputs=p,
-                grad_outputs=torch.ones_like(sdf_i),
-                create_graph=False,  # 不保留二阶图，节省显存
-                retain_graph=True,
-                only_inputs=True
-            )[0]
-            normals_i = F.normalize(grad_i, p=2, dim=-1)
-
-        # 3. 法线传入 color_net（推荐 detach，避免颜色梯度影响几何）
-        rgb_i = color_net(p, d, feat_i, normals_i.detach())
-
-        sdf_list.append(sdf_i)
+        feat_i = feat_all[i:i + chunk]
+        normals_i = normals_all[i:i + chunk]
+        rgb_i = color_net(p, d, feat_i, normals_i)
         rgb_list.append(rgb_i)
-
-    sdf_all = torch.cat(sdf_list, 0)  # [H*W*n_samples, 1]
     rgb_all = torch.cat(rgb_list, 0)  # [H*W*n_samples, 3]
 
     # --- Eikonal Loss ---
@@ -163,7 +219,7 @@ def evaluate(args, sdf_net, color_net, test_dataset, device, step, logger, lr, l
     rgb_pred, _, _ = render_rays_sdf(
         sdf_net, color_net, rays_o, rays_d,
         near=args.near, far=args.far, n_samples=args.n_samples, s_val=eval_s,
-        compute_eikonal=False
+        compute_eikonal=False, normal_mode=args.normal_mode
     )
 
     psnr = logger.evaluate_and_log(
@@ -230,7 +286,7 @@ def train(args):
             sdf_net, color_net, rays_o, rays_d,
             near=args.near, far=args.far,
             n_samples=args.n_samples, s_val=s_curr,
-            use_random_sample=True
+            use_random_sample=True, normal_mode=args.normal_mode
         )
 
         # Loss
@@ -292,6 +348,9 @@ def main():
     parser.add_argument("--eikonal_weight", type=float, default=0.1, help="Eikonal Loss 权重")
     parser.add_argument("--display_int", type=int, default=500)
     parser.add_argument("--device", type=str, default="auto")
+    parser.add_argument("--normal_mode", type=str, default="autograd",
+                        choices=["autograd", "finite_diff"],
+                        help="法线计算方式: autograd=精确梯度(H20推荐), finite_diff=有限差分(P800推荐)")
     args = parser.parse_args()
     train(args)
 

@@ -149,6 +149,7 @@ if __name__ == '__main__':
     sdf, feats = sdf_net(pts)
     rgb = color_net(pts, dirs, feats, normals)
     s = variance()
+
     print(f"SDF shape: {sdf.shape}, s = {s.item():.4f}")
     print(f"SDF shape: {sdf.shape}, range: [{sdf.min():.3f}, {sdf.max():.3f}]")
     print(f"RGB shape: {rgb.shape}, range: [{rgb.min():.3f}, {rgb.max():.3f}]")
