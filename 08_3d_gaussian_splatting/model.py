@@ -241,18 +241,6 @@ class GaussianModel(nn.Module):
         ]
 
     @torch.no_grad()
-    def apply_constraints(self):
-        # 论文原版：剔除 log(scale) > log(scene_extent * percent_dense)
-        # percent_dense=0.01，scene_extent 即归一化后的 scene_radius
-        # 这里 radius 已是归一化后的场景半径（相机球半径，约 1.0）
-        # 论文实际用 0.01 * scene_radius 作为上界，约束更紧
-        max_log_scale = np.log(self.radius * 0.01)  # 0.01 * radius（论文标准）
-        self.gauss_params["scales"].clamp_(max=max_log_scale)
-        # 约束不能偏离中心太远
-        limit = self.radius * 1.5  # 论文用 scene_extent，比之前的 2.0 更严格
-        self.gauss_params["means"].clamp_(-limit, limit)
-
-    @torch.no_grad()
     def reset_opacity(self):
         """透明度重置：强制所有点重新证明自己的存在价值"""
         # sigmoid(-4.6) ≈ 0.01

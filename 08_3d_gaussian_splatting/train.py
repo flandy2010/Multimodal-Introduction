@@ -128,9 +128,8 @@ def train(args):
         # 主动清理 gaussians 字典
         gaussians.clear()
 
-        # --- E. 更新 + 约束 ---
+        # --- E. 更新 ---
         optimizer.step()
-        model.apply_constraints()
 
         # --- F. 日志 ---
         stats = model.get_diagnostics()
