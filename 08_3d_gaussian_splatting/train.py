@@ -109,10 +109,10 @@ def train(args):
             "L1": f"{loss_l1.item():.4f}",
             "Ls": f"{loss_ssim.item():.4f}",
             "Pts": model.num_points,
-            'eff': f"{stats['effective_fraction']:.2f}",  # 有效占比
-            'low_op': f"{stats['frac_opacity_below_0.05']:.2f}",  # 低透明度占比
-            'max_r': f"{stats['avg_radius_max']:.3f}",  # 最大尺度
-            'SH_hi': f"{stats['sh_high_dc_ratio']:.3f}"  # 高阶/直流比
+            'eff': f"{stats['effective_fraction']:.2f}",  # 不透明度 > 0.05的点的占比
+            'low_op': f"{stats['frac_opacity_below_0.05']:.2f}",  # 不透明度小于 0.05 的椭球占比
+            'max_r': f"{stats['avg_radius_max']:.3f}",  # 最大高斯球半径
+            'SH_hi': f"{stats['sh_high_dc_ratio']:.3f}"  # 视角相关分量强度 / 基础色强度
         })
 
         if step % args.display_int == 0 or step == args.n_iters - 1:

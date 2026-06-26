@@ -60,7 +60,8 @@ def gsplat_rasterizer(gaussians, w2c, K, H, W, tile_size=16):
 
     # 3. 调用 gsplat 加速渲染
     # render_colors: [H, W, 3]
-    # info: 包含 densification 需要的 viewspace_points 梯度信息
+    # absgrad=True：让 gsplat 在 CUDA kernel 内部直接累积 |∇2D| 到 means2d.absgrad，
+    # 无需 retain_grad()，不会把渲染中间量 pin 在 PyTorch 计算图里，大幅节省显存。
     render_colors, render_alphas, info = _gsplat_rasterization(
         means=means,
         quats=quats,
@@ -72,19 +73,13 @@ def gsplat_rasterizer(gaussians, w2c, K, H, W, tile_size=16):
         width=W,
         height=H,
         tile_size=tile_size,
-        # sh_degree = 3 # 如果传入的是 SH，取消注释
+        absgrad=True,  # 官方推荐：用 absgrad 替代 retain_grad()
     )
 
-    # 重要：为了让 strategy.step 能拿到梯度进行致密化，
-    # 我们需要把 info 里的 viewspace 梯度保留下来
+    # 把 means2d 存入 gaussians，strategy.step 通过 means2d.absgrad 读取梯度累积量，
+    # 不再需要 retain_grad()，计算图可在 backward 后正常释放。
     if means.requires_grad:
-        # 这个操作会将 gsplat 的中间变量暴露给 PyTorch 的 backward
-        # 你的 strategy.step 内部需要用到这个 grad
-        means2d = info["means2d"]
-        means2d.retain_grad()
-        # 将其临时挂载到返回的 image 上，以便后面能通过 image.metadata 找到（或者直接用全局变量）
-        # 这里为了最小修改，我们将它存在 gaussians 字典里供后面提取
-        gaussians["viewspace_points"] = means2d
+        gaussians["viewspace_points"] = info["means2d"]
 
     return render_colors
 

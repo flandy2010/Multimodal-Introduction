@@ -293,6 +293,34 @@ class GaussianModel(nn.Module):
         return grad_2d_norm
 
     @torch.no_grad()
+    def update_densification_stats(self, viewspace_points):
+        """
+        从 gsplat absgrad=True 模式中累积 2D 梯度统计，用于致密化判断。
+        viewspace_points: info["means2d"]，形状 [1, N, 2]，其 .absgrad 由 gsplat 在 backward 时填充。
+        注意：必须在 loss.backward() 之后调用（此时 absgrad 已被填充）。
+        """
+        if viewspace_points is None:
+            return
+        # gsplat absgrad 模式：梯度累积在 .absgrad 属性上，形状 [1, N, 2]
+        if hasattr(viewspace_points, "absgrad") and viewspace_points.absgrad is not None:
+            grad = viewspace_points.absgrad.squeeze(0)  # [N, 2]
+            grad_norm = grad.norm(dim=-1)               # [N]
+        elif viewspace_points.grad is not None:
+            # 兼容 retain_grad 旧模式
+            grad = viewspace_points.grad.squeeze(0)
+            grad_norm = grad.norm(dim=-1)
+        else:
+            return
+
+        if not hasattr(self, "_grad_accum"):
+            self._grad_accum = torch.zeros(self.num_points, device=grad_norm.device)
+            self._grad_count = torch.zeros(self.num_points, device=grad_norm.device)
+
+        n = min(grad_norm.shape[0], self.num_points)
+        self._grad_accum[:n] += grad_norm[:n]
+        self._grad_count[:n] += 1
+
+    @torch.no_grad()
     def densify_and_prune(self, optimizer, grad_threshold=0.0002, min_opacity=0.005, max_scale=None, c2w=None):
         """
         自适应密度控制（选项A：简洁安全版）
@@ -301,17 +329,29 @@ class GaussianModel(nn.Module):
         - 彻底清理旧优化器，防止显存泄漏
         """
         # ==================== 1. 前置检查 ====================
-        if self.means.grad is None:
+        # 优先使用 absgrad 累积量（来自 update_densification_stats），
+        # 其次回退到单帧 means.grad（兼容旧模式）
+        has_absgrad = hasattr(self, "_grad_accum") and self._grad_count.sum() > 0
+        if not has_absgrad and self.means.grad is None:
             return optimizer
 
-        # ==================== 2. 计算屏幕空间梯度（调用独立函数） ====================
-        grads = self.compute_screen_space_gradient(
-            self.gauss_params["means"],
-            self.gauss_params["means"].grad,
-            c2w,  # 当前训练视角的外参 (3x4 或 4x4)
-            self.fx, # 内参焦距 x (像素单位)
-            self.fy  # 内参焦距 y (像素单位)
-        )
+        # ==================== 2. 获取屏幕空间梯度 ====================
+        if has_absgrad:
+            # absgrad 模式：直接用累积的平均 2D 梯度范数，已经是屏幕空间，无需再投影
+            count = self._grad_count.clamp(min=1)
+            grads = self._grad_accum / count  # [N] 平均 2D 梯度范数
+            # 用完后重置累积量
+            self._grad_accum.zero_()
+            self._grad_count.zero_()
+        else:
+            # 回退：用 means.grad 通过雅可比矩阵投影到屏幕空间
+            grads = self.compute_screen_space_gradient(
+                self.gauss_params["means"],
+                self.gauss_params["means"].grad,
+                c2w,
+                self.fx,
+                self.fy,
+            )
 
         # ==================== 3. 生成增密与剪枝掩码 ====================
         # 获取物理属性（注意：scales和opacities已经是经过 exp/sigmoid 还原的物理值）
@@ -364,6 +404,11 @@ class GaussianModel(nn.Module):
         self.gauss_params = nn.ParameterDict(new_params)
         self.num_points = self.gauss_params["means"].shape[0]
 
+        # 点数变化后重置梯度累积量，尺寸对齐新 num_points
+        device = self.gauss_params["means"].device
+        self._grad_accum = torch.zeros(self.num_points, device=device)
+        self._grad_count = torch.zeros(self.num_points, device=device)
+
         # ==================== 7. 选项A：彻底销毁旧优化器 + 重建新优化器 ====================
         # 7.1 将旧优化器中所有参数的梯度置 None（释放梯度显存）
         optimizer.zero_grad(set_to_none=True)
@@ -373,6 +418,7 @@ class GaussianModel(nn.Module):
 
         # 7.3 手动删除旧优化器对象（在函数返回前强制释放引用）
         del optimizer
+        torch.cuda.empty_cache()  # 强制释放 CUDA 碎片，防止新旧优化器状态同时驻留
 
         # 7.4 使用新的参数组创建全新的 Adam 优化器
         # 注意：新参数的 grad 默认为 None，所以新优化器的动量从零开始

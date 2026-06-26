@@ -42,14 +42,16 @@ class GSLogger:
 
     def log_dataset_stats(self, loader):
         """记录数据集分布（写入汇总表头部）"""
-        img_mean = loader.images.mean().item()
-        img_std = loader.images.std().item()
+        # loader.images 改为懒加载列表，采样一张图估算像素均值，避免全量加载
+        sample_img, *_ = loader.get_view_params(0)
+        img_mean = sample_img.mean().item()
+        img_std = sample_img.std().item()
         centers = loader.poses[:, :3, 3]
         dist_mean = torch.norm(centers, dim=1).mean().item()
 
         stats = f"## 数据集\n" \
                 f"- 分辨率: {loader.W}x{loader.H} | 视角: {len(loader.images)} | " \
-                f"像素均值: {img_mean:.4f} | 相机距离: {dist_mean:.4f}\n\n"
+                f"像素均值(采样): {img_mean:.4f} | 相机距离: {dist_mean:.4f}\n\n"
 
         with open(self.summary_path, "a") as f:
             f.write(stats)
