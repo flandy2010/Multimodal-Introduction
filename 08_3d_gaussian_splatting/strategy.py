@@ -79,7 +79,7 @@ class GaussianStrategy:
     #
     #     return optimizer
 
-    def step(self, step, model, optimizer, viewspace_points=None):  # 增加参数
+    def step(self, step, model, optimizer, c2w, viewspace_points=None):  # 增加参数
         """每步调用：增加梯度累积 + 密度控制 + 透明度重置"""
 
         # --- 新增：梯度累积 (SDF 训练不需要，但 3DGS 必须有) ---
@@ -89,10 +89,10 @@ class GaussianStrategy:
             model.update_densification_stats(viewspace_points)
 
         # 密度控制：每 100 步执行 (保持不变)
-        if (step >= self.densify_from_iter and
-                step < self.densify_until_iter and
-                step % self.densification_interval == 0 and
-                model.num_points < self.max_points):
+        if (self.densify_from_iter <= step < self.densify_until_iter
+            and step % self.densification_interval == 0
+            and model.num_points < self.max_points
+        ):
             max_scale = model.radius * 0.1
             # 执行真正的分裂/克隆/剔除
             optimizer = model.densify_and_prune(
@@ -100,6 +100,7 @@ class GaussianStrategy:
                 grad_threshold=self.grad_threshold,
                 min_opacity=0.005,
                 max_scale=max_scale,
+                c2w=c2w,
             )
             print(f"📊 [Step {step}] Densify: {model.num_points} points")
 

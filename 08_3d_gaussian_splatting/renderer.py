@@ -2,6 +2,7 @@ import torch
 import torch.nn.functional as F
 from gsplat import rasterization
 
+
 def gsplat_rasterizer(gaussians, w2c, K, H, W, tile_size=16):
     """
     作为 simple_rasterizer 的直接替代品。

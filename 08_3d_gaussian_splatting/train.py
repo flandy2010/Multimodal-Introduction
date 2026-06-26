@@ -36,6 +36,8 @@ def train(args):
 
     # 4. 模型
     model = GaussianModel(
+        fx=loader.focal,
+        fy=loader.focal,
         num_points=args.num_points,
         radius=scene_radius,
         sh_degree=args.sh_degree,
@@ -73,8 +75,8 @@ def train(args):
 
         # --- B. 渲染 ---
         idx = np.random.randint(len(loader.images))
-        gt_image, w2c, K, camera_pos = loader.get_view_params(idx)
-        gt_image, w2c, K, camera_pos = gt_image.to(device), w2c.to(device), K.to(device), camera_pos.to(device)
+        gt_image, c2w, w2c, K, camera_pos = loader.get_view_params(idx)
+        gt_image, c2w, w2c, K, camera_pos = gt_image.to(device), c2w.to(device), w2c.to(device), K.to(device), camera_pos.to(device)
 
         gaussians = model(camera_pos=camera_pos)
         # out_image = simple_rasterizer(gaussians, w2c, K, loader.H, loader.W, tile_size=args.tile_size)
@@ -91,7 +93,7 @@ def train(args):
 
         # --- D. 密度策略 ---
         # optimizer = strategy.step(step, model, optimizer)
-        optimizer = strategy.step(step, model, optimizer, viewspace_points=viewspace_points)
+        optimizer = strategy.step(step, model, optimizer, c2w=c2w, viewspace_points=viewspace_points)
 
         # --- E. 更新 + 约束 ---
         optimizer.step()

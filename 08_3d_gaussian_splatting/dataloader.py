@@ -143,7 +143,7 @@ class GSDataLoader:
         c2w = torch.eye(4)
         c2w[:3, :4] = self.poses[index]
         camera_pos = c2w[:3, 3]  # 相机在世界坐标系的位置
-        return image, torch.inverse(c2w), self.K, camera_pos
+        return image, c2w, torch.inverse(c2w), self.K, camera_pos
 
     def get_initial_pcd(self):
         return self.initial_points, self.initial_colors
