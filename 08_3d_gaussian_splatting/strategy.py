@@ -47,44 +47,27 @@ class GaussianStrategy:
                  densification_interval=100,
                  opacity_reset_interval=3000,
                  grad_threshold=0.0002,
-                 max_points=80000):
+                 max_points=80000,
+                 image_hw=None,       # (H, W)，训练开始后不变，存一次即可
+                 ):
+
         self.densify_from_iter = densify_from_iter
         self.densify_until_iter = densify_until_iter
         self.densification_interval = densification_interval
         self.opacity_reset_interval = opacity_reset_interval
         self.grad_threshold = grad_threshold
         self.max_points = max_points
+        self.image_hw = image_hw      # 固定分辨率，不需要每步传
 
-    # def step(self, step, model, optimizer):
-    #     """每步调用：密度控制 + 透明度重置"""
-    #
-    #     # 密度控制：每 100 步执行
-    #     if (step >= self.densify_from_iter and
-    #             step < self.densify_until_iter and
-    #             step % self.densification_interval == 0 and
-    #             model.num_points < self.max_points):
-    #         max_scale = model.radius * 0.1  # 剔除场景级巨球
-    #         optimizer = model.densify_and_prune(
-    #             optimizer,
-    #             grad_threshold=self.grad_threshold,
-    #             min_opacity=0.005,
-    #             max_scale=max_scale,
-    #         )
-    #         print(f"📊 [Step {step}] Densify: {model.num_points} points")
-    #
-    #     # 透明度重置：每 3000 步
-    #     if step > 0 and step % self.opacity_reset_interval == 0:
-    #         model.reset_opacity()
-    #         print(f"🧹 [Step {step}] Opacity reset")
-    #
-    #     return optimizer
-
-    def step(self, step, model, optimizer, c2w, viewspace_points=None, viewspace_gids=None, image_hw=None):
+    def step(self, step, model, optimizer, c2w, viewspace_points=None, viewspace_gids=None,
+             radii=None):
         """每步调用：梯度累积 + 密度控制（clone/split/prune）+ 透明度重置"""
 
-        # 梯度累积（仅 densify 区间需要）
+        # 梯度累积 + max_radii2D 更新（仅 densify 区间需要）
         if step < self.densify_until_iter and viewspace_points is not None:
-            model.update_densification_stats(viewspace_points, image_hw=image_hw, gids=viewspace_gids)
+            model.update_densification_stats(
+                viewspace_points, image_hw=self.image_hw, gids=viewspace_gids, radii=radii
+            )
 
         # clone/split/prune：仅在 densify 区间内（原论文做法）
         if (self.densify_from_iter <= step < self.densify_until_iter

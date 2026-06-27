@@ -144,12 +144,13 @@ class GaussianModel(nn.Module):
 
         if pcd is not None:
             means, colors_raw = pcd
-            # sh存放了高斯球的SH系数，第0阶为RGB(3维，取值[0, 1])通过固定因子缩放得到，高阶留到训练时慢慢学。
-            sh = torch.zeros(means.shape[0], self.n_sh_coeffs, 3)
-            sh[:, 0, :] = rgb_to_sh0(colors_raw)
+            sh_dc   = torch.zeros(means.shape[0], 1, 3)
+            sh_dc[:, 0, :] = rgb_to_sh0(colors_raw)
+            sh_rest = torch.zeros(means.shape[0], self.n_sh_coeffs - 1, 3)
         else:
-            means = torch.rand(num_points, 3) * 2 - 1
-            sh = torch.zeros(num_points, self.n_sh_coeffs, 3)
+            means   = torch.rand(num_points, 3) * 2 - 1
+            sh_dc   = torch.zeros(num_points, 1, 3)
+            sh_rest = torch.zeros(num_points, self.n_sh_coeffs - 1, 3)
 
         self.num_points = means.shape[0]
 
@@ -158,7 +159,8 @@ class GaussianModel(nn.Module):
             "scales":    nn.Parameter(torch.log(torch.ones(means.shape[0], 3) * 0.003 + torch.rand(means.shape[0], 3) * 0.002)),
             "rotations": nn.Parameter(torch.tile(torch.tensor([1.0, 0, 0, 0]), (means.shape[0], 1))),
             "opacities": nn.Parameter(torch.ones(means.shape[0], 1) * (-2.0)),
-            "sh_coeffs": nn.Parameter(sh),
+            "sh_dc":     nn.Parameter(sh_dc),    # [N, 1, 3]  DC 分量，学习率 0.0025
+            "sh_rest":   nn.Parameter(sh_rest),  # [N, 15, 3] 高阶分量，学习率 0.0025/20
         })
 
         # 屏幕空间最大半径（像素），每步渲染后从外部写入，用于 densify 时的屏幕空间剪枝
@@ -183,7 +185,8 @@ class GaussianModel(nn.Module):
 
     @property
     def sh_coeffs(self):
-        return self.gauss_params["sh_coeffs"]
+        """将 sh_dc 和 sh_rest 拼接返回，保持 [N, n_sh, 3] 接口兼容"""
+        return torch.cat([self.gauss_params["sh_dc"], self.gauss_params["sh_rest"]], dim=1)
 
     def get_scaling(self):
         return torch.exp(self.scales)
@@ -212,7 +215,7 @@ class GaussianModel(nn.Module):
             "opacity": self.get_opacity(),
             # 原始叶节点参数引用，供 simple_rasterizer 手动写梯度用
             "_raw_opacity":   self.gauss_params["opacities"],   # logit, leaf
-            "_raw_sh_coeffs": self.gauss_params["sh_coeffs"],   # leaf
+            "_raw_sh_coeffs": self.gauss_params["sh_dc"],   # 兼容旧接口（实际只有dc部分）
             "_raw_scales":    self.gauss_params["scales"],       # log-space, leaf
             "_raw_rotations": self.gauss_params["rotations"],    # unnorm quat, leaf
         }
@@ -234,7 +237,9 @@ class GaussianModel(nn.Module):
         """
         return [
             {'params': [self.gauss_params["means"]], 'lr': 0.00016, 'name': 'means'},
-            {'params': [self.gauss_params["sh_coeffs"]], 'lr': 0.0025, 'name': 'sh_coeffs'},
+            # SH 系数分离存储（对齐原论文）：DC 分量 lr=0.0025，高阶分量 lr=0.0025/20
+            {'params': [self.gauss_params["sh_dc"]],   'lr': 0.0025,        'name': 'sh_dc'},
+            {'params': [self.gauss_params["sh_rest"]], 'lr': 0.0025 / 20.0, 'name': 'sh_rest'},
             {'params': [self.gauss_params["opacities"]], 'lr': 0.05, 'name': 'opacities'},
             {'params': [self.gauss_params["scales"]], 'lr': 0.005, 'name': 'scales'},
             {'params': [self.gauss_params["rotations"]], 'lr': 0.001, 'name': 'rotations'},
@@ -245,43 +250,6 @@ class GaussianModel(nn.Module):
         """透明度重置：强制所有点重新证明自己的存在价值"""
         # sigmoid(-4.6) ≈ 0.01
         self.gauss_params["opacities"].fill_(-4.6)
-
-    @torch.no_grad()
-    def prune_only(self, optimizer, min_opacity=0.005, max_scale=None):
-        """
-        轻量剪枝：只删除低透明度和超大球，不做 clone/split。
-        用于 densify 区间结束后全程维护（防止大球失控）。
-        """
-        opacities = self.get_opacity().squeeze()      # [N]
-        scale_max = self.get_scaling().max(dim=-1).values  # [N]
-
-        prune_mask = opacities < min_opacity
-        if max_scale is not None:
-            prune_mask = prune_mask | (scale_max > max_scale)
-
-        if not prune_mask.any():
-            return optimizer
-
-        n_pruned = prune_mask.sum().item()
-        new_params = {}
-        for name, param in self.gauss_params.items():
-            new_params[name] = param[~prune_mask]
-
-        self.gauss_params = nn.ParameterDict(new_params)
-        self.num_points = self.gauss_params["means"].shape[0]
-
-        # 同步重置梯度累积量
-        device = self.gauss_params["means"].device
-        self._grad_accum = torch.zeros(self.num_points, device=device)
-        self._grad_count = torch.zeros(self.num_points, device=device)
-
-        # 重建优化器
-        optimizer.zero_grad(set_to_none=True)
-        optimizer.state.clear()
-        del optimizer
-        new_optimizer = torch.optim.Adam(self.get_optimizer_groups(), eps=1e-15)
-        print(f"  [Prune-only] removed {n_pruned} → {self.num_points} pts")
-        return new_optimizer
 
     @staticmethod
     def compute_screen_space_gradient(means, means_grad, c2w, fx, fy, eps=1e-6):
@@ -334,27 +302,27 @@ class GaussianModel(nn.Module):
         return grad_2d_norm
 
     @torch.no_grad()
-    def update_densification_stats(self, viewspace_points, image_hw=None, gids=None):
+    def update_densification_stats(self, viewspace_points, image_hw=None, gids=None, radii=None):
         """
-        累积 2D 屏幕空间梯度统计，供 densify_and_prune 判断 clone/split。
-        必须在 loss.backward() 之后调用（absgrad 此时已填充）。
+        累积 2D 屏幕空间梯度统计 + 更新 max_radii2D，供 densify_and_prune 使用。
+        必须在 loss.backward() 之后调用。
 
-        viewspace_points: gsplat 返回的 info["means2d"]，形状 [N_visible, 2]
-          - absgrad=True 模式：.absgrad 属性存放 |∇2D|，单位是归一化像素坐标
-          - retain_grad 旧模式：.grad 属性
-        image_hw: (H, W) 用于将归一化坐标还原为像素坐标（gsplat absgrad 是归一化的）
-        gids: [N_visible] 可见点在全量 N 中的原始下标（gsplat 1.x 必传）
+        viewspace_points: gsplat 返回的 info["means2d"]
+          - absgrad=True 模式：.absgrad 存放 |∇2D|（归一化坐标）
+        image_hw: (H, W) 将归一化梯度还原为像素坐标
+        gids: 可见点在全量 N 中的原始下标
+        radii: [N] 或 [N_visible] 屏幕空间半径（像素），用于更新 max_radii2D
         """
         if viewspace_points is None:
             return
 
         if hasattr(viewspace_points, "absgrad") and viewspace_points.absgrad is not None:
-            grad = viewspace_points.absgrad.squeeze(0)  # [N_visible, 2]
+            grad = viewspace_points.absgrad.squeeze(0)
             if image_hw is not None:
                 H, W = image_hw
                 scale = torch.tensor([W, H], dtype=grad.dtype, device=grad.device)
                 grad = grad * scale
-            grad_norm = grad.norm(dim=-1)   # [N_visible]
+            grad_norm = grad.norm(dim=-1)
         elif viewspace_points.grad is not None:
             grad = viewspace_points.grad.squeeze(0)
             grad_norm = grad.norm(dim=-1)
@@ -366,14 +334,22 @@ class GaussianModel(nn.Module):
             self._grad_count = torch.zeros(self.num_points, device=grad_norm.device)
 
         if gids is not None:
-            # gsplat 1.x：用 gids 将可见点梯度 scatter 回全量位置
             self._grad_accum.scatter_add_(0, gids, grad_norm)
             self._grad_count.index_add_(0, gids, torch.ones_like(grad_norm))
         else:
-            # 兼容旧路径（全量 [N]）
             n = min(grad_norm.shape[0], self.num_points)
             self._grad_accum[:n] += grad_norm[:n]
             self._grad_count[:n] += 1
+
+        # 同步更新 max_radii2D（原论文在 train.py 里做，封装到这里更简洁）
+        if radii is not None:
+            r = radii.view(-1).float()
+            if self.max_radii2D.device != r.device:
+                self.max_radii2D = self.max_radii2D.to(r.device)
+            visibility = r > 0
+            self.max_radii2D[visibility] = torch.max(
+                self.max_radii2D[visibility], r[visibility]
+            )
 
     @torch.no_grad()
     def densify_and_prune(self, optimizer, grad_threshold=0.0002, min_opacity=0.005,
@@ -583,7 +559,9 @@ class GaussianModel(nn.Module):
         diagnostics['avg_radius_max'] = avg_radius.max().item()
 
         # ================== 球谐系数 ==================
-        sh = self.gauss_params["sh_coeffs"]
+        sh_dc   = self.gauss_params["sh_dc"]    # [N, 1, 3]
+        sh_rest = self.gauss_params["sh_rest"]  # [N, 15, 3]
+        sh = torch.cat([sh_dc, sh_rest], dim=1)
         diagnostics['sh_abs_mean'] = sh.abs().mean().item()
         if self.sh_degree > 0:
             dc   = sh[:, 0, :]

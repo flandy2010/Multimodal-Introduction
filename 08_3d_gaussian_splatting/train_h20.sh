@@ -6,7 +6,11 @@
 export CUDA_VISIBLE_DEVICES=0
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-DATA_PATH="../data/360_extra_scenes/flowers"
+# 室内场景
+DATA_PATH="../data/360_extra_scenes/bonsai"
+
+# 开放场景
+# DATA_PATH="../data/360_extra_scenes/flower"
 EXP_DIR="./runs/h20_v5"
 
 rm -rf $EXP_DIR
@@ -14,13 +18,13 @@ rm -rf $EXP_DIR
 python train.py \
     --data_path $DATA_PATH \
     --exp_dir $EXP_DIR \
-    --factor 4 \
-    --num_points 15000 \
+    --factor 2 \
+    --num_points 30000 \
     --max_points 1500000 \
     --n_iters 30000 \
     --sh_degree 3 \
-    --tile_size 64 \
-    --grad_threshold 0.0005 \
+    --tile_size 32 \
+    --grad_threshold 0.0002 \
     --display_int 1000 \
     --device cuda \
     --scale_reg 0.01 \

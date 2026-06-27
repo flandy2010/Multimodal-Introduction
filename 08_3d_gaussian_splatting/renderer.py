@@ -68,7 +68,9 @@ def gsplat_rasterizer(gaussians, w2c, K, H, W, tile_size=16, radius_clip=0.0):
     注意：gsplat CUDA kernel 的 tile_size 只支持 16 和 32，
     传入更大的值会触发 cudaErrorInvalidConfiguration，此处强制限制。
     """
-    gsplat_tile_size = min(tile_size, 16)  # gsplat 只支持 16（及 32，但 16 最安全）
+    # gsplat CUDA kernel 支持 tile_size=16 和 32（更大值会报 cudaErrorInvalidConfiguration）
+    # 高分辨率场景下 tile_size=16 调度开销更小，tile_size=32 则减少 kernel launch 次数
+    gsplat_tile_size = 16 if tile_size <= 16 else 32
     # 1. 提取参数
     # 注意：model.forward 传入的 gaussians 中，scales/rotations/opacity/colors
     # 已经经过 exp/normalize/sigmoid/clamp 等激活，这里直接使用，不要重复激活。

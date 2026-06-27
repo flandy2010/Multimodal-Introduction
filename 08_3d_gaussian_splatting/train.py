@@ -52,6 +52,7 @@ def train(args):
         opacity_reset_interval=3000,
         grad_threshold=args.grad_threshold,
         max_points=args.max_points,
+        image_hw=(loader.H, loader.W),  # 分辨率在训练开始后不变，存一次
     )
 
     # 6. 优化器（论文推荐的绝对学习率，不依赖外部 lr）
@@ -60,9 +61,6 @@ def train(args):
     # Means LR 指数衰减：从 0.00016 → 0.0000016 (衰减 100 倍)
     means_lr_init = 0.00016
     means_lr_final = 0.0000016
-
-    moving_avg_loss = None
-    ema_alpha = 0.9
 
     pbar = tqdm(range(args.n_iters), desc="3DGS Training")
     for step in pbar:
@@ -119,26 +117,17 @@ def train(args):
             loss.backward()
 
         viewspace_points = gaussians.get("viewspace_points", None)
-        viewspace_gids   = gaussians.get("viewspace_gids", None)   # [N_visible] 可见点原始下标
-        radii = gaussians.get("radii", None)  # [N] float，gsplat 路径才有
+        viewspace_gids   = gaussians.get("viewspace_gids", None)
+        radii = gaussians.get("radii", None)
 
-        # --- D. 更新 max_radii2D（屏幕空间最大半径，供 densify 时剪枝用）---
-        if radii is not None and step < strategy.densify_until_iter:
-            with torch.no_grad():
-                r = radii.view(-1).float()  # 确保是 1D float
-                # max_radii2D 始终和 r 放在同一设备上做计算
-                if model.max_radii2D.device != r.device:
-                    model.max_radii2D = model.max_radii2D.to(r.device)
-                visibility = r > 0
-                model.max_radii2D[visibility] = torch.max(
-                    model.max_radii2D[visibility], r[visibility]
-                )
-
-        # --- E. 密度策略 ---
-        optimizer = strategy.step(step, model, optimizer, c2w=c2w,
-                                  viewspace_points=viewspace_points,
-                                  viewspace_gids=viewspace_gids,
-                                  image_hw=(loader.H, loader.W))
+        # --- D. 密度策略 ---
+        optimizer = strategy.step(
+            step, model, optimizer,
+            c2w=c2w,
+            viewspace_points=viewspace_points,
+            viewspace_gids=viewspace_gids,
+            radii=radii
+        )
 
         # 主动清理 gaussians 字典
         gaussians.clear()
@@ -152,7 +141,8 @@ def train(args):
         pbar.set_postfix({
             "L1":    f"{loss_l1.item():.4f}",
             "Pts":   model.num_points,
-            "SH":    f"{model.active_sh_degree}/{model.sh_degree}",
+            # SH：已开启球谐系数 / 总球谐系数 (高阶球谐系数/0阶球谐系数比例)
+            "SH":    f"{model.active_sh_degree}/{model.sh_degree}({stats['sh_high_dc_ratio']:.2f})",
             # op：top10% / 全量 不透明度均值
             "op":    f"{stats['op_top10_mean']:.2f}/{stats['op_mean']:.2f}",
             # ab_op：不透明度过低（< 0.005）的椭球比例
