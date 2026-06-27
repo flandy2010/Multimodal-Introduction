@@ -86,33 +86,25 @@ class GaussianStrategy:
         if step < self.densify_until_iter and viewspace_points is not None:
             model.update_densification_stats(viewspace_points, image_hw=image_hw)
 
-        # clone/split/prune：仅在 densify 区间内
+        # clone/split/prune：仅在 densify 区间内（原论文做法）
         if (self.densify_from_iter <= step < self.densify_until_iter
             and step % self.densification_interval == 0
             and model.num_points < self.max_points
         ):
             max_scale = model.radius * 0.1
+            # 原论文：step > opacity_reset_interval(3000) 后才启用屏幕空间剪枝（20像素）
+            max_screen_size = 20 if step > self.opacity_reset_interval else None
             optimizer = model.densify_and_prune(
                 optimizer,
                 grad_threshold=self.grad_threshold,
                 min_opacity=0.005,
                 max_scale=max_scale,
                 c2w=c2w,
+                max_screen_size=max_screen_size,
             )
             print(f"📊 [Step {step}] Densify: {model.num_points} points")
 
-        # 超大球 / 低透明度 prune：全程有效（densify 结束后也要继续清理）
-        # densify 区间结束后每 100 步做一次轻量 prune（只删不增）
-        elif (step >= self.densify_until_iter
-              and step % self.densification_interval == 0):
-            max_scale = model.radius * 0.1
-            optimizer = model.prune_only(
-                optimizer,
-                min_opacity=0.005,
-                max_scale=max_scale,
-            )
-
-        # 透明度重置（全程有效）
+        # 透明度重置（全程有效，原论文做法）
         if step > 0 and step % self.opacity_reset_interval == 0:
             model.reset_opacity()
             print(f"🧹 [Step {step}] Opacity reset")

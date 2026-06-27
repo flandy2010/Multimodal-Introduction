@@ -100,10 +100,12 @@ def gsplat_rasterizer(gaussians, w2c, K, H, W, tile_size=16, radius_clip=0.0):
         radius_clip=radius_clip,  # 像素单位，默认 0.0 = 不裁剪
     )
 
-    # 把 means2d 存入 gaussians，strategy.step 通过 means2d.absgrad 读取梯度累积量，
-    # 不再需要 retain_grad()，计算图可在 backward 后正常释放。
+    # 把 means2d 和 radii 存入 gaussians 供 strategy 使用
+    # means2d.absgrad: 2D 梯度累积（致密化用）
+    # radii: 每个 Gaussian 的屏幕空间半径（像素），用于 max_radii2D 剪枝
     if means.requires_grad:
         gaussians["viewspace_points"] = info["means2d"]
+        gaussians["radii"] = info["radii"].squeeze(0)          # [N]，像素单位
 
     render_colors = render_colors.squeeze(0)
 

@@ -154,17 +154,16 @@ class GaussianModel(nn.Module):
         self.num_points = means.shape[0]
 
         self.gauss_params = nn.ParameterDict({
-            # means: 高斯球在3D世界空间的中心坐标，shape=[N, 3]
-            "means": nn.Parameter(means),
-            # scales: 高斯椭球在 X、Y、Z三个方向上的半径，shape=[N, 3]，设定为对数尺度方便使用的时候用exp转为正数
-            "scales": nn.Parameter(torch.log(torch.ones(means.shape[0], 3) * 0.003 + torch.rand(means.shape[0], 3) * 0.002)),
-            # rotations: 每个高斯椭球在空间中的朝向，即单位四元数
+            "means":     nn.Parameter(means),
+            "scales":    nn.Parameter(torch.log(torch.ones(means.shape[0], 3) * 0.003 + torch.rand(means.shape[0], 3) * 0.002)),
             "rotations": nn.Parameter(torch.tile(torch.tensor([1.0, 0, 0, 0]), (means.shape[0], 1))),
-            # opacities：高斯球对最终渲染像素的贡献权重，范围在 0~1 之间，shape=[N, ]
-            "opacities": nn.Parameter(torch.ones(means.shape[0], 1) * (-2.0)),  # sigmoid(-2) ≈ 0.12
-            # sh_coeffs：颜色随观察方向变化的球谐系数，shape=[N, n_sh_coeffs, 3]
+            "opacities": nn.Parameter(torch.ones(means.shape[0], 1) * (-2.0)),
             "sh_coeffs": nn.Parameter(sh),
         })
+
+        # 屏幕空间最大半径（像素），每步渲染后从外部写入，用于 densify 时的屏幕空间剪枝
+        # 不作为可学习参数，不放入 gauss_params
+        self.max_radii2D = torch.zeros(self.num_points)
 
     @property
     def means(self):
@@ -371,12 +370,12 @@ class GaussianModel(nn.Module):
         self._grad_count[:n] += 1
 
     @torch.no_grad()
-    def densify_and_prune(self, optimizer, grad_threshold=0.0002, min_opacity=0.005, max_scale=None, c2w=None):
+    def densify_and_prune(self, optimizer, grad_threshold=0.0002, min_opacity=0.005,
+                          max_scale=None, c2w=None, max_screen_size=None):
         """
-        自适应密度控制（选项A：简洁安全版）
-        - 使用屏幕空间梯度判断增密（精准解决近大远小）
-        - 直接重建优化器，丢弃旧动量（避免复杂的索引映射Bug）
-        - 彻底清理旧优化器，防止显存泄漏
+        自适应密度控制（对齐原论文）
+        max_screen_size: 屏幕空间半径上限（像素），超过则 prune。
+                         原论文：step > opacity_reset_interval(3000) 后传 20，之前传 None。
         """
         # ==================== 1. 前置检查 ====================
         # 优先使用 absgrad 累积量（来自 update_densification_stats），
@@ -424,10 +423,14 @@ class GaussianModel(nn.Module):
         # Clone（小点克隆）：梯度大 且 最大轴半径 <= 阈值
         clone_mask = need_densify & (scale_max <= split_threshold)
 
-        # Prune（剪枝）：透明度太低 或 最大轴尺度超过限制
+        # Prune：透明度太低 | world-space 超大球 | screen-space 超大球（原论文三合一）
         prune_mask = opacities < min_opacity
         if max_scale is not None:
             prune_mask = prune_mask | (scale_max > max_scale)
+        if max_screen_size is not None:
+            device = self.gauss_params["means"].device
+            radii = self.max_radii2D.to(device)
+            prune_mask = prune_mask | (radii > max_screen_size)
 
         # ==================== 4. 如果没有变化，清空梯度后提前返回 ====================
         if not (split_mask.any() or clone_mask.any() or prune_mask.any()):
@@ -504,10 +507,11 @@ class GaussianModel(nn.Module):
         self.gauss_params = nn.ParameterDict(new_params)
         self.num_points = self.gauss_params["means"].shape[0]
 
-        # 点数变化后重置梯度累积量，尺寸对齐新 num_points
+        # 点数变化后重置梯度累积量 和 max_radii2D（尺寸对齐新 num_points）
         device = self.gauss_params["means"].device
         self._grad_accum = torch.zeros(self.num_points, device=device)
         self._grad_count = torch.zeros(self.num_points, device=device)
+        self.max_radii2D  = torch.zeros(self.num_points)   # 重置，densify 后重新积累
 
         # ==================== 7. 选项A：彻底销毁旧优化器 + 重建新优化器 ====================
         # 7.1 将旧优化器中所有参数的梯度置 None（释放梯度显存）
