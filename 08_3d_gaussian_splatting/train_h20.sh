@@ -15,7 +15,7 @@ python train.py \
     --data_path $DATA_PATH \
     --exp_dir $EXP_DIR \
     --factor 4 \
-    --num_points 50000 \
+    --num_points 15000 \
     --max_points 1500000 \
     --n_iters 30000 \
     --sh_degree 3 \

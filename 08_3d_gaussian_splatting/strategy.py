@@ -80,20 +80,18 @@ class GaussianStrategy:
     #     return optimizer
 
     def step(self, step, model, optimizer, c2w, viewspace_points=None, image_hw=None):
-        """每步调用：增加梯度累积 + 密度控制 + 透明度重置"""
+        """每步调用：梯度累积 + 密度控制（clone/split/prune）+ 透明度重置"""
 
-        # --- 新增：梯度累积 (SDF 训练不需要，但 3DGS 必须有) ---
-        # 只有在致密化区间内，才需要累积 2D 梯度
+        # 梯度累积（仅 densify 区间需要）
         if step < self.densify_until_iter and viewspace_points is not None:
             model.update_densification_stats(viewspace_points, image_hw=image_hw)
 
-        # 密度控制：每 100 步执行 (保持不变)
+        # clone/split/prune：仅在 densify 区间内
         if (self.densify_from_iter <= step < self.densify_until_iter
             and step % self.densification_interval == 0
             and model.num_points < self.max_points
         ):
             max_scale = model.radius * 0.1
-            # 执行真正的分裂/克隆/剔除
             optimizer = model.densify_and_prune(
                 optimizer,
                 grad_threshold=self.grad_threshold,
@@ -103,7 +101,18 @@ class GaussianStrategy:
             )
             print(f"📊 [Step {step}] Densify: {model.num_points} points")
 
-        # 透明度重置 (保持不变)
+        # 超大球 / 低透明度 prune：全程有效（densify 结束后也要继续清理）
+        # densify 区间结束后每 100 步做一次轻量 prune（只删不增）
+        elif (step >= self.densify_until_iter
+              and step % self.densification_interval == 0):
+            max_scale = model.radius * 0.1
+            optimizer = model.prune_only(
+                optimizer,
+                min_opacity=0.005,
+                max_scale=max_scale,
+            )
+
+        # 透明度重置（全程有效）
         if step > 0 and step % self.opacity_reset_interval == 0:
             model.reset_opacity()
             print(f"🧹 [Step {step}] Opacity reset")

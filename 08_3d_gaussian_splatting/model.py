@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import numpy as np
 
 
@@ -246,6 +247,43 @@ class GaussianModel(nn.Module):
         # sigmoid(-4.6) ≈ 0.01
         self.gauss_params["opacities"].fill_(-4.6)
 
+    @torch.no_grad()
+    def prune_only(self, optimizer, min_opacity=0.005, max_scale=None):
+        """
+        轻量剪枝：只删除低透明度和超大球，不做 clone/split。
+        用于 densify 区间结束后全程维护（防止大球失控）。
+        """
+        opacities = self.get_opacity().squeeze()      # [N]
+        scale_max = self.get_scaling().max(dim=-1).values  # [N]
+
+        prune_mask = opacities < min_opacity
+        if max_scale is not None:
+            prune_mask = prune_mask | (scale_max > max_scale)
+
+        if not prune_mask.any():
+            return optimizer
+
+        n_pruned = prune_mask.sum().item()
+        new_params = {}
+        for name, param in self.gauss_params.items():
+            new_params[name] = param[~prune_mask]
+
+        self.gauss_params = nn.ParameterDict(new_params)
+        self.num_points = self.gauss_params["means"].shape[0]
+
+        # 同步重置梯度累积量
+        device = self.gauss_params["means"].device
+        self._grad_accum = torch.zeros(self.num_points, device=device)
+        self._grad_count = torch.zeros(self.num_points, device=device)
+
+        # 重建优化器
+        optimizer.zero_grad(set_to_none=True)
+        optimizer.state.clear()
+        del optimizer
+        new_optimizer = torch.optim.Adam(self.get_optimizer_groups(), eps=1e-15)
+        print(f"  [Prune-only] removed {n_pruned} → {self.num_points} pts")
+        return new_optimizer
+
     @staticmethod
     def compute_screen_space_gradient(means, means_grad, c2w, fx, fy, eps=1e-6):
         """
@@ -400,23 +438,67 @@ class GaussianModel(nn.Module):
             return optimizer
 
         # ==================== 5. 构造新的参数张量 ====================
+        # 先计算 split 的位置偏移（需要 scales 和 rotations，在遍历前计算）
+        # 原论文做法：沿最大尺度轴方向采样偏移，而非随机均匀偏移
+        # 步骤：① 找每个 split 球的最大尺度轴方向（局部坐标系中的 e_i）
+        #       ② 用四元数把该方向旋转到世界坐标系
+        #       ③ 沿该世界方向采样偏移量（以物理尺度为标准差的正态分布）
+        if split_mask.any():
+            split_scales = torch.exp(self.gauss_params["scales"][split_mask])   # [S, 3] 物理尺度
+            split_quats  = F.normalize(self.gauss_params["rotations"][split_mask], p=2, dim=-1)  # [S, 4]
+
+            # 最大尺度轴的单位向量（局部坐标系中的 x/y/z 之一）
+            max_axis_idx = split_scales.argmax(dim=-1)   # [S]，值为 0/1/2
+            # 构建局部轴向量 [S, 3]
+            local_axis = torch.zeros_like(split_scales)
+            local_axis.scatter_(1, max_axis_idx.unsqueeze(1), 1.0)  # one-hot
+
+            # 用四元数旋转局部轴到世界坐标系
+            # 四元数 (w, x, y, z) 旋转向量 v：R(q) * v
+            w = split_quats[:, 0:1]; x = split_quats[:, 1:2]
+            y = split_quats[:, 2:3]; z = split_quats[:, 3:4]
+            vx = local_axis[:, 0:1]; vy = local_axis[:, 1:2]; vz = local_axis[:, 2:3]
+            # R(q)*v 展开（标准四元数旋转公式）
+            world_axis = torch.cat([
+                (1 - 2*(y*y + z*z))*vx + 2*(x*y - w*z)*vy + 2*(x*z + w*y)*vz,
+                2*(x*y + w*z)*vx + (1 - 2*(x*x + z*z))*vy + 2*(y*z - w*x)*vz,
+                2*(x*z - w*y)*vx + 2*(y*z + w*x)*vy + (1 - 2*(x*x + y*y))*vz,
+            ], dim=-1)   # [S, 3]，已归一化
+
+            # 偏移量：以最大物理尺度为标准差采样（原论文做法）
+            max_scale = split_scales.gather(1, max_axis_idx.unsqueeze(1)).squeeze(1)  # [S]
+            offset = torch.randn(split_mask.sum().item(), device=world_axis.device)    # [S]
+            offset = offset * max_scale   # 按最大尺度缩放
+            split_means_offset = world_axis * offset.unsqueeze(1)   # [S, 3]
+        else:
+            split_means_offset = None
+
         new_params = {}
         for name, param in self.gauss_params.items():
-            # 1) 保留未被剪枝的点
-            remain = param[~prune_mask]
+            # 1) 保留点：未被剪枝 且 未被分裂的点
+            #    注意：split 的原球要移除（它被两个子球替代），所以排除 split_mask
+            keep_mask = ~prune_mask & ~split_mask
+            remain = param[keep_mask]
 
-            # 2) 克隆的点直接复制
+            # 2) 克隆的点直接复制（位置不变）
             cloned = param[clone_mask]
 
-            # 3) 分裂的点复制一份，但尺度要缩小（物理半径除以 1.6）
+            # 3) 分裂：两份拷贝，scale ÷ 1.6，means 沿最大尺度轴偏移
             split_src = param[split_mask]
             if name == "scales":
-                # 因为 self.gauss_params 存的是 log(scale)，
-                # 所以 log(s) - log(1.6) 等价于物理尺度除以 1.6
+                # log(s) - log(1.6)  等价于物理尺度 ÷ 1.6
                 split_src = split_src - np.log(1.6)
+            elif name == "means" and split_means_offset is not None:
+                # 两份 split 球的位置：一个 +offset，一个 -offset
+                split_src = torch.cat([
+                    split_src + split_means_offset,
+                    split_src - split_means_offset,
+                ], dim=0)
+                new_params[name] = torch.cat([remain, cloned, split_src], dim=0)
+                continue   # means 已经处理，跳过下面的 cat
 
-            # 拼接顺序：[保留点, 克隆点, 分裂点]
-            new_params[name] = torch.cat([remain, cloned, split_src], dim=0)
+            # 非 means 的参数：split 球两份相同（scale 已缩小，其他保持原值）
+            new_params[name] = torch.cat([remain, cloned, split_src, split_src], dim=0)
 
         # ==================== 6. 更新模型参数 ====================
         self.gauss_params = nn.ParameterDict(new_params)
