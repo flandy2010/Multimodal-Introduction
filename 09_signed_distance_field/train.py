@@ -68,126 +68,111 @@ def render_rays_sdf(sdf_net, color_net, rays_o, rays_d, near, far, n_samples, s_
                     use_random_sample=False, compute_eikonal=True,
                     normal_mode="autograd"):
     """
-    SDF 体渲染（对标 06 NeRF 的 render_rays，核心区别是 SDF→alpha 的转换 + Eikonal Loss）
+    SDF 体渲染。支持两种输入格式（自动识别）：
+      - 全图模式：rays_o/rays_d 为 [H, W, 3]，输出 rgb_pred [H, W, 3]（评估用）
+      - 随机射线模式：rays_o/rays_d 为 [B, 3]，输出 rgb_pred [B, 3]（训练用）
+
+    Eikonal 采样策略（参考 NeuS 官方）：
+      - 直接复用渲染中已有的采样点，不额外分配，零额外开销
+      - 仅约束 pts_norm < 1.2 的点（单位球内，有效 SDF 区域）
 
     参数:
-        normal_mode: 法线计算方式
-            "autograd"    - 精确梯度法（H20 等新卡推荐，数学精确）
-            "finite_diff" - 有限差分法（P800 等旧卡推荐，速度快）
-    返回: rgb_pred [H, W, 3], loss_eikonal (标量，evaluate 时为 0)
+        normal_mode: "autograd"（精确，H20 推荐）| "finite_diff"（近似，P800 推荐）
     """
-    t_vals = torch.linspace(near, far, n_samples).to(rays_o.device)
+    is_image_mode = rays_o.dim() == 3   # True: [H, W, 3]  False: [B, 3]
 
-    # 随机抖动采样（与 06 NeRF 一致）
+    if is_image_mode:
+        H_img, W_img = rays_o.shape[0], rays_o.shape[1]
+        flat_o = rays_o.reshape(-1, 3)
+        flat_d = rays_d.reshape(-1, 3)
+    else:
+        flat_o = rays_o   # [B, 3]
+        flat_d = rays_d
+
+    B = flat_o.shape[0]  # 总射线数
+
+    t_vals = torch.linspace(near, far, n_samples).to(flat_o.device)
     if use_random_sample:
-        mids = .5 * (t_vals[..., 1:] + t_vals[..., :-1])
-        upper = torch.cat([mids, t_vals[..., -1:]], -1)
-        lower = torch.cat([t_vals[..., :1], mids], -1)
-        t_rand = torch.rand(t_vals.shape).to(rays_o.device)
-        t_vals = lower + (upper - lower) * t_rand
+        mids  = .5 * (t_vals[1:] + t_vals[:-1])
+        upper = torch.cat([mids, t_vals[-1:]], -1)
+        lower = torch.cat([t_vals[:1], mids], -1)
+        t_vals = lower + (upper - lower) * torch.rand(B, n_samples, device=flat_o.device)
+    else:
+        t_vals = t_vals.expand(B, n_samples)   # [B, S]
 
-    z_vals = t_vals.expand(rays_o.shape[:-1] + (n_samples,))
+    # 归一化射线方向
+    flat_d_norm = flat_d / (flat_d.norm(dim=-1, keepdim=True) + 1e-8)
 
-    # 归一化射线方向（SDF 体渲染必须！z_vals 要对应真实欧氏距离）
-    rays_d_norm = rays_d / (rays_d.norm(dim=-1, keepdim=True) + 1e-8)
-
-    # 采样 3D 点（用归一化后的方向）
-    pts = rays_o[..., None, :] + rays_d_norm[..., None, :] * z_vals[..., :, None]
-    H_img, W_img = rays_o.shape[0], rays_o.shape[1]
-
-    # 视角方向（已归一化）
-    dirs_expanded = rays_d_norm[..., None, :].expand_as(pts)
-
-    # Flatten
-    flat_pts = pts.reshape(-1, 3)
-    flat_dirs = dirs_expanded.reshape(-1, 3)
+    # 采样 3D 点  [B, S, 3]
+    pts = flat_o[:, None, :] + flat_d_norm[:, None, :] * t_vals[:, :, None]
+    flat_pts = pts.reshape(-1, 3)           # [B*S, 3]
+    flat_dirs = flat_d_norm.unsqueeze(1).expand_as(pts).reshape(-1, 3)  # [B*S, 3]
 
     # --- 主干前向：SDF + feature + 法线 ---
     chunk = 1024 * 32
     if normal_mode == "finite_diff":
         sdf_all, feat_all, normals_all = compute_normals_finite_diff(sdf_net, flat_pts, chunk)
-    else:  # "autograd"（默认，精确）
+    else:
         sdf_all, feat_all, normals_all = compute_normals_autograd(sdf_net, flat_pts, chunk)
 
-    # 颜色网络（feature 和法线均已 detach，避免颜色梯度影响几何）
+    # 颜色网络
     rgb_list = []
     for i in range(0, flat_pts.shape[0], chunk):
-        p = flat_pts[i:i + chunk]
-        d = flat_dirs[i:i + chunk]
-        feat_i = feat_all[i:i + chunk]
-        normals_i = normals_all[i:i + chunk]
-        rgb_i = color_net(p, d, feat_i, normals_i)
+        rgb_i = color_net(flat_pts[i:i+chunk], flat_dirs[i:i+chunk],
+                          feat_all[i:i+chunk], normals_all[i:i+chunk])
         rgb_list.append(rgb_i)
-    rgb_all = torch.cat(rgb_list, 0)  # [H*W*n_samples, 3]
+    rgb_all = torch.cat(rgb_list, 0)   # [B*S, 3]
 
-    # --- Eikonal Loss ---
-    # 混合策略：50% 表面附近点（从射线采样点里抽） + 50% 全局随机点
-    # 这样既约束表面处梯度为 1，又约束远离表面的空间
+    # --- Eikonal Loss（NeuS 官方：直接复用渲染采样点，不额外采样）---
     if compute_eikonal:
-        n_eik = 5000
-        # 一半来自射线上的采样点（表面附近质量更高）
-        n_surface = n_eik // 2
-        perm = torch.randperm(flat_pts.shape[0], device=rays_o.device)[:n_surface]
-        surface_pts = flat_pts[perm]
-        # 一半随机空间点（覆盖射线有效范围，而非只在原点附近）
-        n_random = n_eik - n_surface
-        # 根据 flat_pts 的实际范围动态决定采样范围
-        with torch.no_grad():
-            pts_min = flat_pts.min(dim=0)[0]
-            pts_max = flat_pts.max(dim=0)[0]
-        random_pts = torch.rand(n_random, 3, device=rays_o.device) * (pts_max - pts_min) + pts_min
-        # 合并
-        eik_pts = torch.cat([surface_pts, random_pts], dim=0)
-        eik_pts.requires_grad_(True)
+        # 在渲染采样点上算 Eikonal，仅约束单位球内的点（pts_norm < 1.2）
+        eik_pts = flat_pts.detach().requires_grad_(True)
         eik_sdf = sdf_net.sdf(eik_pts)
         grad = torch.autograd.grad(
             outputs=eik_sdf, inputs=eik_pts,
             grad_outputs=torch.ones_like(eik_sdf),
             create_graph=True
-        )[0]
-        loss_eikonal = torch.mean((torch.norm(grad, dim=-1) - 1) ** 2)
+        )[0]  # [B*S, 3]
+        pts_norm = flat_pts.detach().norm(dim=-1)              # [B*S]
+        inside_sphere = (pts_norm < 1.2).float()               # 仅约束有效区域
+        grad_norm_sq = (grad.norm(dim=-1) - 1.0) ** 2         # [B*S]
+        denom = inside_sphere.sum() + 1e-5
+        loss_eikonal = (inside_sphere * grad_norm_sq).sum() / denom
     else:
-        loss_eikonal = torch.tensor(0.0, device=rays_o.device)
+        loss_eikonal = torch.tensor(0.0, device=flat_o.device)
 
-    # Reshape
-    sdf_r = sdf_all.reshape(H_img, W_img, n_samples)  # [H, W, S]
-    rgb_r = rgb_all.reshape(H_img, W_img, n_samples, 3)  # [H, W, S, 3]
+    # Reshape 回 [B, S, ...]
+    sdf_r = sdf_all.reshape(B, n_samples)        # [B, S]
+    rgb_r = rgb_all.reshape(B, n_samples, 3)     # [B, S, 3]
 
-    # 计算alpha
-    def get_alpha_volsdf(sdf, s_val, dists):
-        # 方式一：VolSDF 风格（基于密度转换，收敛稳）
-        sigma = s_val * torch.sigmoid(-sdf * s_val)
-        return 1.0 - torch.exp(-sigma * dists)
+    # SDF → alpha（VolSDF 风格）
+    dists = torch.cat([
+        t_vals[:, 1:] - t_vals[:, :-1],
+        torch.full((B, 1), 1e-2, device=flat_o.device)
+    ], dim=-1)  # [B, S]
+    sigma = s_val * torch.sigmoid(-sdf_r * s_val)
+    alpha = 1.0 - torch.exp(-sigma * dists)      # [B, S]
 
-    def get_alpha_neus(sdf, s_val):
-        # 方式二：NeuS 风格（基于 CDF 差值，表面锐利）
-        phi = torch.sigmoid(sdf * s_val)
-        alpha = torch.clamp((phi[..., :-1] - phi[..., 1:]) / (phi[..., :-1] + 1e-10), min=0.0)
-        return torch.cat([alpha, torch.zeros_like(alpha[..., :1])], dim=-1)
-
-    dists = torch.cat([z_vals[..., 1:] - z_vals[..., :-1], torch.full_like(z_vals[..., :1], 1e-2)], -1)
-    alpha = get_alpha_volsdf(sdf_r, s_val, dists)  # 推荐用于训练初期快速出形状
-    # alpha = get_alpha_neus(sdf_r, s_val)            # 推荐用于精细模型导出
-
-    # 正确的 Transmittance 公式（与 06 NeRF 一致）
+    # Transmittance & 体渲染
     transmittance = torch.cumprod(
-        torch.cat([torch.ones_like(alpha[..., :1]), 1 - alpha + 1e-7], dim=-1),
+        torch.cat([torch.ones(B, 1, device=flat_o.device), 1 - alpha + 1e-7], dim=-1),
         dim=-1
-    )[..., :-1]
-    weights = alpha * transmittance
+    )[:, :-1]    # [B, S]
+    weights = alpha * transmittance              # [B, S]
+    rgb_pred_flat = (weights.unsqueeze(-1) * rgb_r).sum(dim=1)   # [B, 3]
 
-    # 体渲染积分
-    rgb_pred = torch.sum(weights[..., None] * rgb_r, dim=-2)
+    # 还原形状
+    if is_image_mode:
+        rgb_pred = rgb_pred_flat.reshape(H_img, W_img, 3)
+    else:
+        rgb_pred = rgb_pred_flat  # [B, 3]
 
-    # 计算一些统计量
-    k = int(0.2 * alpha.numel())
-    top20_alpha, _ = torch.topk(alpha.view(-1), k)
-
+    # 诊断信息（仅全图模式填充有意义的统计）
+    top20_alpha = weights.topk(min(20, n_samples), dim=-1).values.mean().item()
     extra_info = {
-        "min_sdf": torch.min(sdf_all).item(),
-        "max_sdf": torch.max(sdf_all).item(),
-        "mean_alpha": torch.mean(alpha).item(),
-        "top20_alpha": torch.mean(top20_alpha).item(),
+        "min_sdf":   sdf_all.min().item(),
+        "max_sdf":   sdf_all.max().item(),
+        "top20_alpha": top20_alpha,
     }
 
     return rgb_pred, loss_eikonal, extra_info
@@ -263,6 +248,7 @@ def train(args):
         return new_lr
 
     last_eikonal = 0.0
+    n_train = len(train_dataset)
     pbar = tqdm(range(args.n_iters), desc="SDF Training")
 
     for step in pbar:
@@ -272,11 +258,11 @@ def train(args):
         lr = update_lr(step)
         s_curr = variance.s  # 可学习的 s，不再手动退火
 
-        idx = np.random.randint(len(train_dataset))
-        train_item = train_dataset[idx]
-        target_img = train_item["image"].to(device)
-        rays_o = train_item["rays_o"].to(device)
-        rays_d = train_item["rays_d"].to(device)
+        # 随机选一张训练图，再随机采样 batch_size 条射线（NeuS 官方做法）
+        idx = np.random.randint(n_train)
+        rays_o, rays_d, target_rgb = train_dataset.gen_random_rays(
+            idx, args.batch_size, device=device
+        )
 
         rgb_pred, loss_eikonal, extra_info = render_rays_sdf(
             sdf_net, color_net, rays_o, rays_d,
@@ -285,21 +271,16 @@ def train(args):
             use_random_sample=True, normal_mode=args.normal_mode
         )
 
-        # Loss
-        loss_color = F.mse_loss(rgb_pred, target_img)
-        # IDR 初始化后从 step 0 就开启 Eikonal，防止 SDF 在无约束状态下漂移到 [2, 10]
-        # 前 1000 步用较小权重热身，之后全量
-        if step < 1000:
-            eik_w = args.eikonal_weight * 0.1
-        else:
-            eik_w = args.eikonal_weight
+        # Loss（target_rgb 已是 [B, 3]，与 rgb_pred [B, 3] 对应）
+        loss_color = F.mse_loss(rgb_pred, target_rgb)
+        # 前 1000 步 Eikonal 热身（较小权重），之后全量
+        eik_w = args.eikonal_weight * (0.1 if step < 1000 else 1.0)
         loss = loss_color + eik_w * loss_eikonal
 
         optimizer.zero_grad()
         loss.backward()
-        # 梯度裁剪（宽松值，只防数值爆炸，不阻碍 Eikonal 收敛）
+        # 梯度裁剪（宽松值，只防数值爆炸）
         torch.nn.utils.clip_grad_norm_(sdf_net.parameters(), max_norm=1.0)
-
         optimizer.step()
 
         last_eikonal = loss_eikonal.item()
@@ -307,8 +288,7 @@ def train(args):
         s_val_now = s_curr.item() if isinstance(s_curr, torch.Tensor) else s_curr
 
         pbar.set_postfix({
-            "Loss": f"{loss.item():.3f}",
-            "Lc": f"{loss_color.item():.3f}",
+            "Lc": f"{loss_color.item():.4f}",
             "Le": f"{loss_eikonal.item():.3f}",
             "LR": f"{lr:.2e}",
             "PSNR": f"{psnr_val.item():.2f}",
@@ -334,6 +314,8 @@ def main():
     parser.add_argument("--data_path", type=str, default="../data/tiny_nerf_data.npz")
     parser.add_argument("--exp_dir", type=str, default="./runs/sdf_default")
     parser.add_argument("--n_iters", type=int, default=10000)
+    parser.add_argument("--batch_size", type=int, default=512,
+                        help="每步随机采样的射线数（NeuS 官方默认 512，越大越慢但梯度更稳）")
     parser.add_argument("--lr", type=float, default=5e-4)
     parser.add_argument("--n_samples", type=int, default=64)
     parser.add_argument("--near", type=float, default=0.1)

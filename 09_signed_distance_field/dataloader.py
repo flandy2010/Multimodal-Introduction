@@ -83,6 +83,29 @@ class TinySDFDataset(Dataset):
             })
         return cache
 
+    def gen_random_rays(self, img_idx, batch_size, device='cpu'):
+        """
+        从指定图像随机采样 batch_size 条射线（参考 NeuS 官方 gen_random_rays_at）。
+        训练时每步调用，远比全图渲染（H×W 条射线）快。
+
+        返回:
+            rays_o:  [B, 3] 射线起点（已归一化坐标系）
+            rays_d:  [B, 3] 归一化射线方向
+            colors:  [B, 3] 对应像素 GT 颜色 [0, 1]
+        """
+        cached = self._cache[img_idx]
+        H, W = self.H, self.W
+
+        # 随机采样像素坐标
+        px = torch.randint(0, W, (batch_size,))
+        py = torch.randint(0, H, (batch_size,))
+
+        rays_o = cached["rays_o"][py, px]   # [B, 3]
+        rays_d = cached["rays_d"][py, px]   # [B, 3]
+        colors = cached["image"][py, px]    # [B, 3]
+
+        return rays_o.to(device), rays_d.to(device), colors.to(device)
+
     def get_rays(self, pose):
         """
         生成一幅图对应的所有射线（保留接口，供外部单独调用）
