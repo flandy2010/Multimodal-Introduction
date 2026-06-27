@@ -9,27 +9,6 @@ from dataloader import TinySDFDataset
 from logger import SDFLogger
 
 
-def compute_normals_autograd(sdf_net, flat_pts, chunk):
-    """法线方式一（精确）：autograd 求 SDF 对坐标的梯度。"""
-    sdf_list, feat_list, normal_list = [], [], []
-    for i in range(0, flat_pts.shape[0], chunk):
-        p = flat_pts[i:i + chunk].detach().requires_grad_(True)
-        with torch.enable_grad():
-            sdf_i, feat_i = sdf_net.sdf_and_feature(p)
-            grad_i = torch.autograd.grad(
-                outputs=sdf_i, inputs=p,
-                grad_outputs=torch.ones_like(sdf_i),
-                create_graph=False, retain_graph=True, only_inputs=True
-            )[0]
-            normals_i = F.normalize(grad_i, p=2, dim=-1)
-        sdf_list.append(sdf_i)
-        feat_list.append(feat_i)
-        normal_list.append(normals_i.detach())
-    return (
-        torch.cat(sdf_list, 0),
-        torch.cat(feat_list, 0),
-        torch.cat(normal_list, 0),
-    )
 
 
 def get_alpha_volsdf(sdf, s_val, dists):
@@ -104,43 +83,51 @@ def render_rays_sdf(sdf_net, color_net, rays_o, rays_d, near, far, n_samples, s_
     flat_pts = pts.reshape(-1, 3)           # [B*S, 3]
     flat_dirs = flat_d_norm.unsqueeze(1).expand_as(pts).reshape(-1, 3)  # [B*S, 3]
 
-    # --- 主干前向：SDF + feature + 法线 ---
-    chunk = 1024 * 32
-    sdf_all, feat_all, normals_all = compute_normals_autograd(sdf_net, flat_pts, chunk)
+    # --- 主干前向（单次 sdf_net forward，法线和 Eikonal 出自同一张图）---
+    eik_pts = flat_pts.detach().requires_grad_(True)
 
-    # 颜色网络
+    if compute_eikonal:
+        # 训练：全图支持，create_graph 用于 Eikonal 双次反向
+        out = sdf_net(eik_pts)                              # [N, 257]
+        sdf_all  = out[:, :1]
+        feat_all = out[:, 1:]
+        grad_all = torch.autograd.grad(
+            sdf_all, eik_pts, torch.ones_like(sdf_all),
+            create_graph=True, retain_graph=True, only_inputs=True
+        )[0]
+        grad_norm  = grad_all.norm(dim=-1)
+        pts_norm   = flat_pts.detach().norm(dim=-1)
+        inside     = (pts_norm < 1.2).float()
+        loss_eikonal = (inside * (grad_norm - 1.0) ** 2).sum() / (inside.sum() + 1e-5)
+        eik_diag = {
+            "inside_frac": inside.mean().item(),
+            "grad_mean":   (inside * grad_norm.detach()).sum().item() / (inside.sum().item() + 1e-5),
+            "grad_max":    (inside * grad_norm.detach()).max().item(),
+            "count":       int(inside.sum().item()),
+        }
+    else:
+        # 评估（no_grad 上下文）：临时 enable_grad 求法线，不做 Eikonal
+        with torch.enable_grad():
+            out = sdf_net(eik_pts)
+            sdf_all  = out[:, :1]
+            feat_all = out[:, 1:]
+            grad_all = torch.autograd.grad(
+                sdf_all, eik_pts, torch.ones_like(sdf_all),
+                create_graph=False, retain_graph=False, only_inputs=True
+            )[0]
+        loss_eikonal = torch.tensor(0.0, device=flat_o.device)
+        eik_diag = {}
+
+    normals_all = F.normalize(grad_all.detach(), p=2, dim=-1)
+
+    # 颜色网络（法线已 detach，不会反向影响 SDF 几何）
+    chunk = 1024 * 32
     rgb_list = []
     for i in range(0, flat_pts.shape[0], chunk):
         rgb_i = color_net(flat_pts[i:i+chunk], flat_dirs[i:i+chunk],
                           feat_all[i:i+chunk], normals_all[i:i+chunk])
         rgb_list.append(rgb_i)
     rgb_all = torch.cat(rgb_list, 0)   # [B*S, 3]
-
-    # --- Eikonal Loss（NeuS 官方：直接复用渲染采样点，不额外采样）---
-    if compute_eikonal:
-        eik_pts = flat_pts.detach().requires_grad_(True)
-        eik_sdf = sdf_net.sdf(eik_pts)
-        grad = torch.autograd.grad(
-            outputs=eik_sdf, inputs=eik_pts,
-            grad_outputs=torch.ones_like(eik_sdf),
-            create_graph=True
-        )[0]  # [B*S, 3]
-        grad_norm = grad.norm(dim=-1)                       # [B*S]
-        pts_norm = flat_pts.detach().norm(dim=-1)            # [B*S]
-        inside_sphere = (pts_norm < 1.2).float()
-        grad_norm_sq = (grad_norm - 1.0) ** 2
-        denom = inside_sphere.sum() + 1e-5
-        loss_eikonal = (inside_sphere * grad_norm_sq).sum() / denom
-        # 诊断：记录 sphere 内的梯度统计和覆盖率
-        eik_diag = {
-            "inside_frac":     inside_sphere.mean().item(),        # 球内点比例
-            "grad_mean":       (inside_sphere * grad_norm).sum().item() / denom.item(),  # 球内梯度模长均值
-            "grad_max":        (inside_sphere * grad_norm).max().item(),
-            "count":           int(inside_sphere.sum().item()),
-        }
-    else:
-        loss_eikonal = torch.tensor(0.0, device=flat_o.device)
-        eik_diag = {}
 
     # Reshape 回 [B, S, ...]
     sdf_r = sdf_all.reshape(B, n_samples)        # [B, S]
