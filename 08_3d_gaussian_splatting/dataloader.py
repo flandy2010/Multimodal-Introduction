@@ -148,7 +148,7 @@ class GSDataLoader:
         for name in self.img_names:
             img = Image.open(img_dir / name).convert("RGB")
             img = img.resize((self.W, self.H), Image.LANCZOS)
-            images.append(torch.from_numpy(np.array(img)).float() / 255.0)
+            images.append(torch.from_numpy(np.array(img, dtype=np.float32) / 255.0))
         return images
 
     def get_view_params(self, index):
