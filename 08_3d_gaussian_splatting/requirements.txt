@@ -31,6 +31,7 @@ sympy==1.14.0
 tifffile==2026.6.1
 torch==2.12.1
 tqdm==4.68.3
+trimesh==4.12.2
 typing_extensions==4.15.0
 wadler_lindig==0.1.7
 wheel==0.47.0
