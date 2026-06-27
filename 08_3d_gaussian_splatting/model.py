@@ -221,9 +221,9 @@ class GaussianModel(nn.Module):
         }
 
         if camera_pos is not None:
-            with torch.no_grad():
-                viewdirs = camera_pos.unsqueeze(0) - self.means.detach()
-                viewdirs = viewdirs / (viewdirs.norm(dim=-1, keepdim=True) + 1e-8)
+            # 保持颜色分支到 means 的梯度链路，避免切断位置-颜色联合优化
+            viewdirs = camera_pos.unsqueeze(0) - self.means
+            viewdirs = viewdirs / (viewdirs.norm(dim=-1, keepdim=True) + 1e-8)
             result["colors"] = self.get_color_from_sh(viewdirs)
         else:
             result["colors"] = (SH_C0 * self.sh_coeffs[:, 0] + 0.5).clamp(0.0, 1.0)
@@ -240,7 +240,7 @@ class GaussianModel(nn.Module):
             # SH 系数分离存储（对齐原论文）：DC 分量 lr=0.0025，高阶分量 lr=0.0025/20
             {'params': [self.gauss_params["sh_dc"]],   'lr': 0.0025,        'name': 'sh_dc'},
             {'params': [self.gauss_params["sh_rest"]], 'lr': 0.0025 / 20.0, 'name': 'sh_rest'},
-            {'params': [self.gauss_params["opacities"]], 'lr': 0.05, 'name': 'opacities'},
+            {'params': [self.gauss_params["opacities"]], 'lr': 0.025, 'name': 'opacities'},
             {'params': [self.gauss_params["scales"]], 'lr': 0.005, 'name': 'scales'},
             {'params': [self.gauss_params["rotations"]], 'lr': 0.001, 'name': 'rotations'},
         ]

@@ -169,7 +169,7 @@ def main():
     parser.add_argument("--exp_dir", type=str, default="./runs/gs_default")
 
     parser.add_argument("--factor", type=int, default=8, help="Image downscale factor")
-    parser.add_argument("--num_points", type=int, default=15000, help="Max initial points")
+    parser.add_argument("--num_points", type=int, default=15000, help="Initial points: >0 random truncate, -1 use all COLMAP points")
     parser.add_argument("--max_points", type=int, default=1000000, help="Max total points")
     parser.add_argument("--n_iters", type=int, default=30000)
     parser.add_argument("--sh_degree", type=int, default=3, help="SH degree (0=DC, 3=full)")
