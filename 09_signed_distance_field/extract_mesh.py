@@ -121,34 +121,59 @@ def _save_ply(verts, faces, path):
 # 可视化
 # ---------------------------------------------------------------------------
 
+def _tight_ax_limits(ax, verts):
+    """将 3D 轴范围自适应到 mesh 的真实 bounding box，保持等比例。"""
+    vmin = verts.min(axis=0)   # [3]
+    vmax = verts.max(axis=0)
+    center = (vmin + vmax) / 2
+    half = ((vmax - vmin).max() / 2) * 1.08   # 留 8% 边距
+    ax.set_xlim(center[0] - half, center[0] + half)
+    ax.set_ylim(center[1] - half, center[1] + half)
+    ax.set_zlim(center[2] - half, center[2] + half)
+    ax.set_box_aspect([1, 1, 1])
+
+
+def _make_poly(verts, faces):
+    """辅助：构造 Poly3DCollection（shared style）"""
+    return Poly3DCollection(
+        verts[faces], alpha=0.55,
+        linewidths=0.05,
+        edgecolors=(0.3, 0.5, 0.8, 0.15),
+        facecolors=(0.6, 0.78, 0.95, 0.7),
+    )
+
+
+# ---------------------------------------------------------------------------
+# 可视化
+# ---------------------------------------------------------------------------
+
 def visualize(verts, faces, sdf_grid, bound, out_dir):
     """
-    生成三幅图并保存到 out_dir：
-      1. mesh_view.png  — 三视角 3D 线框/面片渲染（azimuth 0/90/135）
-      2. sdf_slice.png  — XY / XZ / YZ 三个中间切面的 SDF 值热力图
-      3. hist.png       — SDF 值直方图（诊断 SDF 场是否 well-formed）
+    生成四份可视化输出到 out_dir：
+      1. mesh_view.png  — 三视角 3D 面片渲染（自适应轴范围）
+      2. sdf_slice.png  — XY / XZ / YZ 三切面热力图
+      3. sdf_hist.png   — SDF 值直方图
+      4. mesh_360.gif   — 绕 mesh 旋转一周动画（36 帧）
     """
     os.makedirs(out_dir, exist_ok=True)
 
-    # ------- 1. Mesh 三视角 -------
+    # ------- 1. Mesh 三视角（自适应轴）-------
     fig = plt.figure(figsize=(15, 5))
     azimuths = [30, 120, 210]
     for idx, az in enumerate(azimuths):
         ax = fig.add_subplot(1, 3, idx + 1, projection="3d")
-        poly = Poly3DCollection(verts[faces], alpha=0.4, linewidths=0.1,
-                                edgecolors="steelblue", facecolors="lightsteelblue")
-        ax.add_collection3d(poly)
-        lim = bound * 1.1
-        ax.set_xlim(-lim, lim); ax.set_ylim(-lim, lim); ax.set_zlim(-lim, lim)
+        ax.add_collection3d(_make_poly(verts, faces))
+        _tight_ax_limits(ax, verts)
         ax.set_xlabel("X"); ax.set_ylabel("Y"); ax.set_zlabel("Z")
         ax.view_init(elev=20, azim=az)
         ax.set_title(f"azim={az}°")
-    plt.suptitle(f"Extracted Mesh  ({len(verts)} verts, {len(faces)} faces)", y=1.01)
+        ax.tick_params(labelsize=7)
+    plt.suptitle(f"Mesh  ({len(verts):,} verts, {len(faces):,} faces)", y=1.01)
     plt.tight_layout()
     mesh_path = os.path.join(out_dir, "mesh_view.png")
     plt.savefig(mesh_path, dpi=120, bbox_inches="tight")
     plt.close()
-    print(f"  Mesh 视图: {mesh_path}")
+    print(f"  Mesh 三视角: {mesh_path}")
 
     # ------- 2. SDF slice -------
     R = sdf_grid.shape[0]
@@ -167,8 +192,8 @@ def visualize(verts, faces, sdf_grid, bound, out_dir):
         ax.contour(sl.T, levels=[0.0], colors="black",
                    linewidths=1.5, extent=[-bound, bound, -bound, bound])
         plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-        ax.set_title(title); ax.set_xlabel(""); ax.set_ylabel("")
-    plt.suptitle("SDF Slice（黑线=零等值面）")
+        ax.set_title(title)
+    plt.suptitle("SDF Slice (zero isosurface = black line)")
     plt.tight_layout()
     slice_path = os.path.join(out_dir, "sdf_slice.png")
     plt.savefig(slice_path, dpi=120, bbox_inches="tight")
@@ -178,7 +203,7 @@ def visualize(verts, faces, sdf_grid, bound, out_dir):
     # ------- 3. SDF 直方图 -------
     fig, ax = plt.subplots(figsize=(7, 4))
     ax.hist(sdf_grid.ravel(), bins=200, color="steelblue", alpha=0.8)
-    ax.axvline(0, color="red", linewidth=1.5, label="SDF=0（表面）")
+    ax.axvline(0, color="red", linewidth=1.5, label="SDF=0 (surface)")
     ax.set_xlabel("SDF value"); ax.set_ylabel("count (log)")
     ax.set_yscale("log"); ax.legend()
     ax.set_title("SDF Field Distribution")
@@ -188,7 +213,40 @@ def visualize(verts, faces, sdf_grid, bound, out_dir):
     plt.close()
     print(f"  SDF 直方图: {hist_path}")
 
-    return mesh_path, slice_path, hist_path
+    # ------- 4. 旋转 GIF -------
+    gif_path = _make_rotation_gif(verts, faces, out_dir)
+    print(f"  旋转 GIF:   {gif_path}")
+
+    return mesh_path, slice_path, hist_path, gif_path
+
+
+def _make_rotation_gif(verts, faces, out_dir, n_frames=36, dpi=90, fps=12):
+    """绕 mesh 中心旋转一周（360°），保存为 GIF。"""
+    from matplotlib.animation import FuncAnimation, PillowWriter
+
+    fig = plt.figure(figsize=(5, 5))
+    ax = fig.add_subplot(111, projection="3d")
+
+    poly = _make_poly(verts, faces)
+    ax.add_collection3d(poly)
+    _tight_ax_limits(ax, verts)
+    ax.set_xlabel("X"); ax.set_ylabel("Y"); ax.set_zlabel("Z")
+    ax.tick_params(labelsize=7)
+
+    azimuths = np.linspace(0, 360, n_frames, endpoint=False)
+
+    def update(frame):
+        ax.view_init(elev=20, azim=azimuths[frame])
+        return [poly]
+
+    ani = FuncAnimation(fig, update, frames=n_frames, interval=1000 // fps, blit=False)
+
+    gif_path = os.path.join(out_dir, "mesh_360.gif")
+    ani.save(gif_path, writer=PillowWriter(fps=fps), dpi=dpi)
+    plt.close()
+    return gif_path
+
+
 
 
 # ---------------------------------------------------------------------------
