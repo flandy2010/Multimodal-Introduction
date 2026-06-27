@@ -10,17 +10,12 @@ from logger import SDFLogger
 
 
 def compute_normals_autograd(sdf_net, flat_pts, chunk):
-    """
-    法线方式一（精确）：autograd 求 SDF 对坐标的梯度。
-    - 优点：数学精确，与 Eikonal 定义完全一致
-    - 缺点：每 chunk 需 retain_graph=True，多次 GPU-CPU 同步，P800 等旧卡较慢
-    - 适用：H20 等新卡，或需要精确法线的场景
-    """
+    """法线方式一（精确）：autograd 求 SDF 对坐标的梯度。"""
     sdf_list, feat_list, normal_list = [], [], []
     for i in range(0, flat_pts.shape[0], chunk):
         p = flat_pts[i:i + chunk].detach().requires_grad_(True)
         with torch.enable_grad():
-            sdf_i, feat_i = sdf_net(p)
+            sdf_i, feat_i = sdf_net.sdf_and_feature(p)
             grad_i = torch.autograd.grad(
                 outputs=sdf_i, inputs=p,
                 grad_outputs=torch.ones_like(sdf_i),
@@ -31,30 +26,25 @@ def compute_normals_autograd(sdf_net, flat_pts, chunk):
         feat_list.append(feat_i)
         normal_list.append(normals_i.detach())
     return (
-        torch.cat(sdf_list, 0),    # [N, 1] 带梯度
-        torch.cat(feat_list, 0),   # [N, W] 带梯度
-        torch.cat(normal_list, 0), # [N, 3] 已 detach
+        torch.cat(sdf_list, 0),
+        torch.cat(feat_list, 0),
+        torch.cat(normal_list, 0),
     )
 
 
 def compute_normals_finite_diff(sdf_net, flat_pts, chunk, eps=1e-3):
-    """
-    法线方式二（近似）：有限差分，6 次 no_grad 前向近似梯度。
-    - 优点：无 autograd 计算图，无 GPU-CPU 同步，P800 等旧卡更快
-    - 缺点：精度略低（eps=1e-3 已足够，视觉差别极小）
-    - 适用：P800 等旧卡，或追求训练速度的场景
-    """
-    offsets = torch.eye(3, device=flat_pts.device) * eps  # [3, 3]
+    """法线方式二（近似）：有限差分，6 次 no_grad 前向近似梯度。"""
+    offsets = torch.eye(3, device=flat_pts.device) * eps
     normal_list, feat_list = [], []
     with torch.no_grad():
         for i in range(0, flat_pts.shape[0], chunk):
             p = flat_pts[i:i + chunk]
-            _, feat_i = sdf_net(p)
+            _, feat_i = sdf_net.sdf_and_feature(p)
             feat_list.append(feat_i)
             grad_fd = []
             for k in range(3):
-                sdf_pos, _ = sdf_net(p + offsets[k])
-                sdf_neg, _ = sdf_net(p - offsets[k])
+                sdf_pos = sdf_net.sdf(p + offsets[k])
+                sdf_neg = sdf_net.sdf(p - offsets[k])
                 grad_fd.append((sdf_pos - sdf_neg) / (2 * eps))
             normals_i = F.normalize(torch.cat(grad_fd, dim=-1), p=2, dim=-1)
             normal_list.append(normals_i)
@@ -65,7 +55,7 @@ def compute_normals_finite_diff(sdf_net, flat_pts, chunk, eps=1e-3):
     sdf_list = []
     for i in range(0, flat_pts.shape[0], chunk):
         p = flat_pts[i:i + chunk]
-        sdf_i, _ = sdf_net(p)
+        sdf_i = sdf_net.sdf(p)
         sdf_list.append(sdf_i)
     return (
         torch.cat(sdf_list, 0),  # [N, 1] 带梯度
@@ -149,7 +139,7 @@ def render_rays_sdf(sdf_net, color_net, rays_o, rays_d, near, far, n_samples, s_
         # 合并
         eik_pts = torch.cat([surface_pts, random_pts], dim=0)
         eik_pts.requires_grad_(True)
-        eik_sdf, _ = sdf_net(eik_pts)
+        eik_sdf = sdf_net.sdf(eik_pts)
         grad = torch.autograd.grad(
             outputs=eik_sdf, inputs=eik_pts,
             grad_outputs=torch.ones_like(eik_sdf),
@@ -244,7 +234,13 @@ def train(args):
     test_dataset = TinySDFDataset(args.data_path, mode='test')
 
     # 模型
-    sdf_net = SDFNetwork(init_radius=args.init_radius).to(device)
+    # NeuS 原版参数：d_in=3, d_out=257(1+256), d_hidden=256, n_layers=8,
+    # skip_in=(4,), multires=6, bias=init_radius, scale=1
+    sdf_net = SDFNetwork(
+        d_in=3, d_out=257, d_hidden=256, n_layers=8,
+        skip_in=(4,), multires=6, bias=args.init_radius, scale=1.0,
+        geometric_init=True, weight_norm=True
+    ).to(device)
     color_net = ColorNetwork().to(device)
     variance = LearnableVariance(init_val=args.s_val_init).to(device)  # 可学习的 s 参数
 
@@ -291,13 +287,13 @@ def train(args):
 
         # Loss
         loss_color = F.mse_loss(rgb_pred, target_img)
-        if step < 2000:
-            loss = loss_color + 0.0 * loss_eikonal
-        elif 2000 <= step < 3000:
-            rate = (step - 2000) / 1000
-            loss = loss_color + args.eikonal_weight * loss_eikonal * rate
+        # IDR 初始化后从 step 0 就开启 Eikonal，防止 SDF 在无约束状态下漂移到 [2, 10]
+        # 前 1000 步用较小权重热身，之后全量
+        if step < 1000:
+            eik_w = args.eikonal_weight * 0.1
         else:
-            loss = loss_color + args.eikonal_weight * loss_eikonal
+            eik_w = args.eikonal_weight
+        loss = loss_color + eik_w * loss_eikonal
 
         optimizer.zero_grad()
         loss.backward()

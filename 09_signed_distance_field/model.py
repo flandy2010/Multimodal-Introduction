@@ -21,64 +21,103 @@ class PositionalEncoding(nn.Module):
 
 
 class SDFNetwork(nn.Module):
+    """
+    SDF 网络，完全参照 NeuS 原版实现（borrowed from IDR）。
 
-    def __init__(self, D=8, W=256, L_pos=10, init_radius=0.5):
+    关键差异（相比朴素实现）：
+    1. skip 层的线性层输出是 W - input_ch（不是 W），然后和输入拼接凑成 W
+       → skip 层只学"残差"，输入 pass-through，/ sqrt(2) 保持量级
+    2. forward 里 skip 时 x = cat([x, inputs]) / sqrt(2)
+    3. 最终 SDF 值除以 scale（坐标归一化系数），其余 feature 不除
+    4. IDR 几何初始化：确保 SDF 初始输出 ≈ ||x|| - bias（球体先验）
+    """
+
+    def __init__(self, d_in=3, d_out=257, d_hidden=256, n_layers=8,
+                 skip_in=(4,), multires=6, bias=0.5, scale=1.0,
+                 geometric_init=True, weight_norm=True, inside_outside=False):
         super().__init__()
-        self.L_pos = L_pos
-        self.init_radius = init_radius          # 保存下来，forward 要用
-        self.pos_enc = PositionalEncoding(L_pos)
-        in_dim = 3 + 3 * 2 * L_pos
 
-        def make_layer(in_f, out_f, is_sdf_head=False):
-            layer = nn.Linear(in_f, out_f)
-            if is_sdf_head:
-                # ---- 修改点：让网络初始输出接近 0，不喧宾夺主 ----
-                # 权重用极小标准差，偏置设为 0，这样 self.sdf_linear(h) ≈ 0
-                nn.init.normal_(layer.weight, mean=0.0, std=1e-5)
-                nn.init.constant_(layer.bias, 0.0)
+        # dims[0] 初始为 d_in，有 PE 时替换为 PE 输出维度
+        dims = [d_in] + [d_hidden] * n_layers + [d_out]
+
+        self.embed_fn_fine = None
+        if multires > 0:
+            self.embed_fn_fine = PositionalEncoding(multires)
+            dims[0] = 3 + 3 * 2 * multires   # PE 展开后维度
+
+        self.num_layers = len(dims)
+        self.skip_in   = skip_in
+        self.scale      = scale
+
+        for l in range(self.num_layers - 1):
+            # NeuS 原版：skip 层的输出是 W - input_ch，不是 W
+            if l + 1 in self.skip_in:
+                out_dim = dims[l + 1] - dims[0]
             else:
-                nn.init.normal_(layer.weight, 0.0, np.sqrt(2) / np.sqrt(out_f))
-                nn.init.constant_(layer.bias, -0.01)
-            return nn.utils.weight_norm(layer)
+                out_dim = dims[l + 1]
 
-        # 几何主干（不变）
-        layers = []
-        layers.append(make_layer(in_dim, W))
-        for i in range(D - 1):
-            if i == 4:
-                layers.append(make_layer(W + in_dim, W))
-            else:
-                layers.append(make_layer(W, W))
-        self.pts_linears = nn.ModuleList(layers)
+            lin = nn.Linear(dims[l], out_dim)
 
-        # 输出头：sdf 和 feature
-        self.sdf_linear = nn.Linear(W, 1)   # 不使用 weight_norm
-        nn.init.normal_(self.sdf_linear.weight, 0.0, std=1e-4)
-        nn.init.constant_(self.sdf_linear.bias, 1e-4)
+            if geometric_init:
+                if l == self.num_layers - 2:
+                    # 最后一层（SDF 头 + feature 头合并输出）
+                    if not inside_outside:
+                        nn.init.normal_(lin.weight, mean=np.sqrt(np.pi) / np.sqrt(dims[l]), std=0.0001)
+                        nn.init.constant_(lin.bias, -bias)
+                    else:
+                        nn.init.normal_(lin.weight, mean=-np.sqrt(np.pi) / np.sqrt(dims[l]), std=0.0001)
+                        nn.init.constant_(lin.bias, bias)
+                elif multires > 0 and l == 0:
+                    # 第一层：PE 维度（后 dims[0]-3 列）权重置 0
+                    nn.init.constant_(lin.bias, 0.0)
+                    nn.init.constant_(lin.weight[:, 3:], 0.0)
+                    nn.init.normal_(lin.weight[:, :3], 0.0, np.sqrt(2) / np.sqrt(out_dim))
+                elif multires > 0 and l in self.skip_in:
+                    # skip 层：skip 拼接进来的 PE 部分（后 dims[0]-3 列）置 0
+                    nn.init.constant_(lin.bias, 0.0)
+                    nn.init.normal_(lin.weight, 0.0, np.sqrt(2) / np.sqrt(out_dim))
+                    nn.init.constant_(lin.weight[:, -(dims[0] - 3):], 0.0)
+                else:
+                    nn.init.constant_(lin.bias, 0.0)
+                    nn.init.normal_(lin.weight, 0.0, np.sqrt(2) / np.sqrt(out_dim))
 
-        self.feature_linear = nn.Linear(W, W)
-        # feature 的初始化可以保持原样，或简单的 xavier
-        nn.init.xavier_uniform_(self.feature_linear.weight)
-        nn.init.constant_(self.feature_linear.bias, 0.0)
+            if weight_norm:
+                lin = nn.utils.weight_norm(lin)
 
-    def forward(self, x):
+            setattr(self, "lin" + str(l), lin)
 
-        x_embed = self.pos_enc(x)
-        h = x_embed
-        for i, l in enumerate(self.pts_linears):
-            if i == 5:
-                h = torch.cat([x_embed, h], dim=-1)
-            h = F.softplus(l(h), beta=20)
+        self.activation = nn.Softplus(beta=100)
 
-        # 原始网络输出（初始≈0）
-        sdf_raw = self.sdf_linear(h)
+    def forward(self, inputs):
+        # 坐标缩放（NeuS 原版用 scale 做归一化）
+        inputs = inputs * self.scale
+        if self.embed_fn_fine is not None:
+            inputs = self.embed_fn_fine(inputs)
 
-        # ---- 关键：加上球体距离先验 ----
-        # ||x|| - init_radius，保持维度一致
-        sdf = sdf_raw + torch.norm(x, dim=-1, keepdim=True) - self.init_radius
+        x = inputs
+        for l in range(self.num_layers - 1):
+            lin = getattr(self, "lin" + str(l))
 
-        features = self.feature_linear(h)
-        return sdf, features
+            # skip 连接：cat 后 / sqrt(2) 保持量级
+            if l in self.skip_in:
+                x = torch.cat([x, inputs], dim=-1) / np.sqrt(2)
+
+            x = lin(x)
+
+            if l < self.num_layers - 2:
+                x = self.activation(x)
+
+        # 最终输出：SDF 值 / scale，feature 不除
+        return torch.cat([x[:, :1] / self.scale, x[:, 1:]], dim=-1)
+
+    def sdf(self, x):
+        """仅返回 SDF 值 [N, 1]"""
+        return self.forward(x)[:, :1]
+
+    def sdf_and_feature(self, x):
+        """返回 SDF [N, 1] 和 feature [N, d_hidden]"""
+        out = self.forward(x)
+        return out[:, :1], out[:, 1:]
 
 
 class ColorNetwork(nn.Module):

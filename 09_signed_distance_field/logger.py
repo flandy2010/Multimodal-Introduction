@@ -120,17 +120,17 @@ class SDFLogger:
 
         # ---- 1. XY平面 (Z=0) ----
         pts_xy = torch.stack([x, y, torch.zeros_like(x)], dim=-1).to(device).reshape(-1, 3)
-        sdf_xy, _ = sdf_net(pts_xy)
+        sdf_xy = sdf_net.sdf(pts_xy)
         sdf_xy = sdf_xy.reshape(res, res).cpu().numpy()
 
         # ---- 2. XZ平面 (Y=0) ----
         pts_xz = torch.stack([x, torch.zeros_like(x), y], dim=-1).to(device).reshape(-1, 3)
-        sdf_xz, _ = sdf_net(pts_xz)
+        sdf_xz = sdf_net.sdf(pts_xz)
         sdf_xz = sdf_xz.reshape(res, res).cpu().numpy()
 
         # ---- 3. YZ平面 (X=0) ----
         pts_yz = torch.stack([torch.zeros_like(x), x, y], dim=-1).to(device).reshape(-1, 3)
-        sdf_yz, _ = sdf_net(pts_yz)
+        sdf_yz = sdf_net.sdf(pts_yz)
         sdf_yz = sdf_yz.reshape(res, res).cpu().numpy()
 
         # ---- 绘图 ----
