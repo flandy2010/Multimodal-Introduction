@@ -297,26 +297,34 @@ class GaussianModel(nn.Module):
         return grad_2d_norm
 
     @torch.no_grad()
-    def update_densification_stats(self, viewspace_points):
+    def update_densification_stats(self, viewspace_points, image_hw=None):
         """
-        从 gsplat absgrad=True 模式中累积 2D 梯度统计，用于致密化判断。
-        viewspace_points: info["means2d"]，形状 [1, N, 2]，其 .absgrad 由 gsplat 在 backward 时填充。
-        注意：必须在 loss.backward() 之后调用（此时 absgrad 已被填充）。
+        累积 2D 屏幕空间梯度统计，供 densify_and_prune 判断 clone/split。
+        必须在 loss.backward() 之后调用（absgrad 此时已填充）。
+
+        viewspace_points: gsplat 返回的 info["means2d"]，形状 [1, N, 2]
+          - absgrad=True 模式：.absgrad 属性存放 |∇2D|，单位是归一化像素坐标
+          - retain_grad 旧模式：.grad 属性
+        image_hw: (H, W) 用于将归一化坐标还原为像素坐标（gsplat absgrad 是归一化的）
         """
         if viewspace_points is None:
             return
-        # gsplat absgrad 模式：梯度累积在 .absgrad 属性上，形状 [1, N, 2]
+
         if hasattr(viewspace_points, "absgrad") and viewspace_points.absgrad is not None:
-            grad = viewspace_points.absgrad.squeeze(0)  # [N, 2]
-            grad_norm = grad.norm(dim=-1)               # [N]
+            grad = viewspace_points.absgrad.squeeze(0)  # [N, 2]，归一化坐标
+            # gsplat absgrad 的单位是归一化坐标（除以了图像尺寸），需乘回像素尺寸
+            if image_hw is not None:
+                H, W = image_hw
+                scale = torch.tensor([W, H], dtype=grad.dtype, device=grad.device)
+                grad = grad * scale
+            grad_norm = grad.norm(dim=-1)   # [N]，像素单位
         elif viewspace_points.grad is not None:
-            # 兼容 retain_grad 旧模式
             grad = viewspace_points.grad.squeeze(0)
             grad_norm = grad.norm(dim=-1)
         else:
             return
 
-        if not hasattr(self, "_grad_accum"):
+        if not hasattr(self, "_grad_accum") or self._grad_accum.shape[0] != self.num_points:
             self._grad_accum = torch.zeros(self.num_points, device=grad_norm.device)
             self._grad_count = torch.zeros(self.num_points, device=grad_norm.device)
 
@@ -358,10 +366,14 @@ class GaussianModel(nn.Module):
             )
 
         # ==================== 3. 生成增密与剪枝掩码 ====================
-        # 获取物理属性（注意：scales和opacities已经是经过 exp/sigmoid 还原的物理值）
-        scales = self.get_scaling()  # [N, 3]
-        opacities = self.get_opacity().squeeze()  # [N]
-        scale_max = scales.max(dim=-1).values  # [N] 最大轴半径（论文用 max 而非 mean）
+        scales    = self.get_scaling()                # [N, 3]
+        opacities = self.get_opacity().squeeze()      # [N]
+        scale_max = scales.max(dim=-1).values         # [N] 最大轴半径
+
+        # 梯度分布诊断（帮助排查 clone/split 不触发的问题）
+        print(f"  [Densify diag] grads: max={grads.max():.5f} mean={grads.mean():.5f} "
+              f"threshold={grad_threshold:.5f} "
+              f"above_threshold={( grads > grad_threshold).sum().item()}/{self.num_points}")
 
         # 需要增密的点：屏幕空间梯度 > 阈值
         need_densify = grads > grad_threshold
