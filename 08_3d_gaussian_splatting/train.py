@@ -119,7 +119,8 @@ def train(args):
             loss.backward()
 
         viewspace_points = gaussians.get("viewspace_points", None)
-        radii = gaussians.get("radii", None)  # [N] int32，gsplat 路径才有
+        viewspace_gids   = gaussians.get("viewspace_gids", None)   # [N_visible] 可见点原始下标
+        radii = gaussians.get("radii", None)  # [N] float，gsplat 路径才有
 
         # --- D. 更新 max_radii2D（屏幕空间最大半径，供 densify 时剪枝用）---
         if radii is not None and step < strategy.densify_until_iter:
@@ -136,6 +137,7 @@ def train(args):
         # --- E. 密度策略 ---
         optimizer = strategy.step(step, model, optimizer, c2w=c2w,
                                   viewspace_points=viewspace_points,
+                                  viewspace_gids=viewspace_gids,
                                   image_hw=(loader.H, loader.W))
 
         # 主动清理 gaussians 字典

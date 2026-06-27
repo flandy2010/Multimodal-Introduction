@@ -100,12 +100,23 @@ def gsplat_rasterizer(gaussians, w2c, K, H, W, tile_size=16, radius_clip=0.0):
         radius_clip=radius_clip,  # 像素单位，默认 0.0 = 不裁剪
     )
 
-    # 把 means2d 和 radii 存入 gaussians 供 strategy 使用
-    # means2d.absgrad: 2D 梯度累积（致密化用）
-    # radii: 每个 Gaussian 的屏幕空间半径（像素），用于 max_radii2D 剪枝
+    # gsplat 1.x 的 info["means2d"]/info["radii"] 只含视锥内可见点 [N_visible, 2]，
+    # info["gaussian_ids"] 记录其在全量 N 中的原始下标。
+    # 必须 scatter 回全量 [N]，否则 train.py 按全量索引时形状不匹配。
     if means.requires_grad:
-        gaussians["viewspace_points"] = info["means2d"]
-        gaussians["radii"] = info["radii"].squeeze(0)          # [N]，像素单位
+        N = means.shape[0]
+        device = means.device
+        gids = info["gaussian_ids"]          # [N_visible]
+
+        # means2d 保留原始引用（absgrad 在此累积），同时记录 gids 供梯度 scatter 用
+        gaussians["viewspace_points"] = info["means2d"]   # [N_visible, 2]
+        gaussians["viewspace_gids"]   = gids              # [N_visible]
+
+        # radii scatter 回全量 [N]，取 x/y 方向最大值，不可见点为 0
+        radii_vis = info["radii"]            # [N_visible, 2] int32
+        radii_full = torch.zeros(N, dtype=torch.float32, device=device)
+        radii_full[gids] = radii_vis.float().max(dim=-1).values
+        gaussians["radii"] = radii_full      # [N]
 
     render_colors = render_colors.squeeze(0)
 

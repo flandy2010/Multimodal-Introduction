@@ -334,27 +334,27 @@ class GaussianModel(nn.Module):
         return grad_2d_norm
 
     @torch.no_grad()
-    def update_densification_stats(self, viewspace_points, image_hw=None):
+    def update_densification_stats(self, viewspace_points, image_hw=None, gids=None):
         """
         累积 2D 屏幕空间梯度统计，供 densify_and_prune 判断 clone/split。
         必须在 loss.backward() 之后调用（absgrad 此时已填充）。
 
-        viewspace_points: gsplat 返回的 info["means2d"]，形状 [1, N, 2]
+        viewspace_points: gsplat 返回的 info["means2d"]，形状 [N_visible, 2]
           - absgrad=True 模式：.absgrad 属性存放 |∇2D|，单位是归一化像素坐标
           - retain_grad 旧模式：.grad 属性
         image_hw: (H, W) 用于将归一化坐标还原为像素坐标（gsplat absgrad 是归一化的）
+        gids: [N_visible] 可见点在全量 N 中的原始下标（gsplat 1.x 必传）
         """
         if viewspace_points is None:
             return
 
         if hasattr(viewspace_points, "absgrad") and viewspace_points.absgrad is not None:
-            grad = viewspace_points.absgrad.squeeze(0)  # [N, 2]，归一化坐标
-            # gsplat absgrad 的单位是归一化坐标（除以了图像尺寸），需乘回像素尺寸
+            grad = viewspace_points.absgrad.squeeze(0)  # [N_visible, 2]
             if image_hw is not None:
                 H, W = image_hw
                 scale = torch.tensor([W, H], dtype=grad.dtype, device=grad.device)
                 grad = grad * scale
-            grad_norm = grad.norm(dim=-1)   # [N]，像素单位
+            grad_norm = grad.norm(dim=-1)   # [N_visible]
         elif viewspace_points.grad is not None:
             grad = viewspace_points.grad.squeeze(0)
             grad_norm = grad.norm(dim=-1)
@@ -365,9 +365,15 @@ class GaussianModel(nn.Module):
             self._grad_accum = torch.zeros(self.num_points, device=grad_norm.device)
             self._grad_count = torch.zeros(self.num_points, device=grad_norm.device)
 
-        n = min(grad_norm.shape[0], self.num_points)
-        self._grad_accum[:n] += grad_norm[:n]
-        self._grad_count[:n] += 1
+        if gids is not None:
+            # gsplat 1.x：用 gids 将可见点梯度 scatter 回全量位置
+            self._grad_accum.scatter_add_(0, gids, grad_norm)
+            self._grad_count.index_add_(0, gids, torch.ones_like(grad_norm))
+        else:
+            # 兼容旧路径（全量 [N]）
+            n = min(grad_norm.shape[0], self.num_points)
+            self._grad_accum[:n] += grad_norm[:n]
+            self._grad_count[:n] += 1
 
     @torch.no_grad()
     def densify_and_prune(self, optimizer, grad_threshold=0.0002, min_opacity=0.005,
