@@ -118,7 +118,6 @@ def render_rays_sdf(sdf_net, color_net, rays_o, rays_d, near, far, n_samples, s_
 
     # --- Eikonal Loss（NeuS 官方：直接复用渲染采样点，不额外采样）---
     if compute_eikonal:
-        # 在渲染采样点上算 Eikonal，仅约束单位球内的点（pts_norm < 1.2）
         eik_pts = flat_pts.detach().requires_grad_(True)
         eik_sdf = sdf_net.sdf(eik_pts)
         grad = torch.autograd.grad(
@@ -126,13 +125,22 @@ def render_rays_sdf(sdf_net, color_net, rays_o, rays_d, near, far, n_samples, s_
             grad_outputs=torch.ones_like(eik_sdf),
             create_graph=True
         )[0]  # [B*S, 3]
-        pts_norm = flat_pts.detach().norm(dim=-1)              # [B*S]
-        inside_sphere = (pts_norm < 1.2).float()               # 仅约束有效区域
-        grad_norm_sq = (grad.norm(dim=-1) - 1.0) ** 2         # [B*S]
+        grad_norm = grad.norm(dim=-1)                       # [B*S]
+        pts_norm = flat_pts.detach().norm(dim=-1)            # [B*S]
+        inside_sphere = (pts_norm < 1.2).float()
+        grad_norm_sq = (grad_norm - 1.0) ** 2
         denom = inside_sphere.sum() + 1e-5
         loss_eikonal = (inside_sphere * grad_norm_sq).sum() / denom
+        # 诊断：记录 sphere 内的梯度统计和覆盖率
+        eik_diag = {
+            "inside_frac":     inside_sphere.mean().item(),        # 球内点比例
+            "grad_mean":       (inside_sphere * grad_norm).sum().item() / denom.item(),  # 球内梯度模长均值
+            "grad_max":        (inside_sphere * grad_norm).max().item(),
+            "count":           int(inside_sphere.sum().item()),
+        }
     else:
         loss_eikonal = torch.tensor(0.0, device=flat_o.device)
+        eik_diag = {}
 
     # Reshape 回 [B, S, ...]
     sdf_r = sdf_all.reshape(B, n_samples)        # [B, S]
@@ -169,6 +177,7 @@ def render_rays_sdf(sdf_net, color_net, rays_o, rays_d, near, far, n_samples, s_
         "min_sdf":   sdf_all.min().item(),
         "max_sdf":   sdf_all.max().item(),
         "top20_alpha": top20_alpha,
+        "eik_diag":  eik_diag,
     }
 
     return rgb_pred, loss_eikonal, extra_info
@@ -284,22 +293,22 @@ def train(args):
 
         optimizer.zero_grad()
         loss.backward()
-        # 梯度裁剪（宽松值，只防数值爆炸）
-        torch.nn.utils.clip_grad_norm_(sdf_net.parameters(), max_norm=1.0)
         optimizer.step()
 
         last_eikonal = loss_eikonal.item()
         psnr_val = -10. * torch.log10(loss_color.detach())
         s_val_now = s_curr.item() if isinstance(s_curr, torch.Tensor) else s_curr
 
+        diag = extra_info.get("eik_diag", {})
         pbar.set_postfix({
             "Lc": f"{loss_color.item():.4f}",
             "Le": f"{loss_eikonal.item():.3f}",
+            "in%": f"{diag.get('inside_frac', 0)*100:.0f}" if diag else "-",
+            "ḡ": f"{diag.get('grad_mean', 0):.2f}" if diag else "-",
+            "g↑": f"{diag.get('grad_max', 0):.1f}" if diag else "-",
             "LR": f"{lr:.2e}",
             "PSNR": f"{psnr_val.item():.2f}",
             "s": f"{s_val_now:.2f}",
-            "d": f"[{extra_info['min_sdf']:.2f}, {extra_info['max_sdf']:.2f}]",
-            "top20_alpha": f"{extra_info['top20_alpha']:.2f}"
         })
 
         if step % args.display_int == 0:
