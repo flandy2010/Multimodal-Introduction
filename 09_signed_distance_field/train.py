@@ -32,52 +32,48 @@ def compute_normals_autograd(sdf_net, flat_pts, chunk):
     )
 
 
-def compute_normals_finite_diff(sdf_net, flat_pts, chunk, eps=1e-3):
-    """法线方式二（近似）：有限差分，6 次 no_grad 前向近似梯度。"""
-    offsets = torch.eye(3, device=flat_pts.device) * eps
-    normal_list, feat_list = [], []
-    with torch.no_grad():
-        for i in range(0, flat_pts.shape[0], chunk):
-            p = flat_pts[i:i + chunk]
-            _, feat_i = sdf_net.sdf_and_feature(p)
-            feat_list.append(feat_i)
-            grad_fd = []
-            for k in range(3):
-                sdf_pos = sdf_net.sdf(p + offsets[k])
-                sdf_neg = sdf_net.sdf(p - offsets[k])
-                grad_fd.append((sdf_pos - sdf_neg) / (2 * eps))
-            normals_i = F.normalize(torch.cat(grad_fd, dim=-1), p=2, dim=-1)
-            normal_list.append(normals_i)
-    normals_all = torch.cat(normal_list, 0)  # [N, 3]
-    feat_all = torch.cat(feat_list, 0)       # [N, W] 无梯度
+def get_alpha_volsdf(sdf, s_val, dists):
+    """VolSDF 风格：基于密度转换，收敛稳定。
 
-    # 带梯度的 SDF 单独算一次（feat 已 detach，只为 loss 反传）
-    sdf_list = []
-    for i in range(0, flat_pts.shape[0], chunk):
-        p = flat_pts[i:i + chunk]
-        sdf_i = sdf_net.sdf(p)
-        sdf_list.append(sdf_i)
-    return (
-        torch.cat(sdf_list, 0),  # [N, 1] 带梯度
-        feat_all,                # [N, W] 无梯度（传给 color_net 够用）
-        normals_all,             # [N, 3] 无梯度
-    )
+    sigma = s * sigmoid(-sdf * s)      # 密度
+    alpha = 1 - exp(-sigma * dist)     # 透射率
+
+    s 含义：控制密度从表面（sdf=0）向外衰减的陡峭程度。
+    s 越大 → 密度越集中在 sdf≈0 → 表面越锐利，但早期容易"过脆"卡在局部最优。
+    推荐 s 从 10 起步，训练中让网络自主学习增大（LearnableVariance）。
+    """
+    sigma = s_val * torch.sigmoid(-sdf * s_val)
+    return 1.0 - torch.exp(-sigma * dists)
+
+
+def get_alpha_neus(sdf, s_val):
+    """NeuS 风格：基于 CDF 差值，表面天然锐利。
+
+    Φ_s(x) = sigmoid(s * x)                          # CDF
+    alpha = (Φ_s(sdf_i) - Φ_s(sdf_i+1)) / Φ_s(sdf_i)   # 不透明度
+
+    s 含义：1/s 是 SDF 空间中表面模糊区域的宽度（标准差）。
+    s 越大 → 表面过渡越窄 → alpha 越集中在 sdf=0 附近。
+    推荐 s 从 3~5 起步（对应 σ=0.2~0.33），训练中网络自主学习增大。
+
+    注意：NeuS 公式天然保证 ∑alpha = 1（每条射线总不透明度为 1），
+    适合 unbounded 场景和无背景的物体重建。
+    """
+    phi = torch.sigmoid(sdf * s_val)                              # [B, S]
+    alpha = (phi[..., :-1] - phi[..., 1:]) / (phi[..., :-1] + 1e-10)
+    alpha = torch.clamp(alpha, min=0.0, max=1.0)
+    return torch.cat([alpha, torch.zeros_like(alpha[..., :1])], dim=-1)
 
 
 def render_rays_sdf(sdf_net, color_net, rays_o, rays_d, near, far, n_samples, s_val,
                     use_random_sample=False, compute_eikonal=True,
-                    normal_mode="autograd"):
+                    alpha_mode="volsdf"):
     """
     SDF 体渲染。支持两种输入格式（自动识别）：
-      - 全图模式：rays_o/rays_d 为 [H, W, 3]，输出 rgb_pred [H, W, 3]（评估用）
-      - 随机射线模式：rays_o/rays_d 为 [B, 3]，输出 rgb_pred [B, 3]（训练用）
+      - 训练模式：rays_o/rays_d 为 [B, 3]，输出 rgb_pred [B, 3]
+      - 评估模式：rays_o/rays_d 为 [H, W, 3]，输出 rgb_pred [H, W, 3]
 
-    Eikonal 采样策略（参考 NeuS 官方）：
-      - 直接复用渲染中已有的采样点，不额外分配，零额外开销
-      - 仅约束 pts_norm < 1.2 的点（单位球内，有效 SDF 区域）
-
-    参数:
-        normal_mode: "autograd"（精确，H20 推荐）| "finite_diff"（近似，P800 推荐）
+    alpha_mode: "volsdf"（密度式，收敛稳）| "neus"（CDF式，表面锐利）
     """
     is_image_mode = rays_o.dim() == 3   # True: [H, W, 3]  False: [B, 3]
 
@@ -110,10 +106,7 @@ def render_rays_sdf(sdf_net, color_net, rays_o, rays_d, near, far, n_samples, s_
 
     # --- 主干前向：SDF + feature + 法线 ---
     chunk = 1024 * 32
-    if normal_mode == "finite_diff":
-        sdf_all, feat_all, normals_all = compute_normals_finite_diff(sdf_net, flat_pts, chunk)
-    else:
-        sdf_all, feat_all, normals_all = compute_normals_autograd(sdf_net, flat_pts, chunk)
+    sdf_all, feat_all, normals_all = compute_normals_autograd(sdf_net, flat_pts, chunk)
 
     # 颜色网络
     rgb_list = []
@@ -145,13 +138,16 @@ def render_rays_sdf(sdf_net, color_net, rays_o, rays_d, near, far, n_samples, s_
     sdf_r = sdf_all.reshape(B, n_samples)        # [B, S]
     rgb_r = rgb_all.reshape(B, n_samples, 3)     # [B, S, 3]
 
-    # SDF → alpha（VolSDF 风格）
+    # SDF → alpha
     dists = torch.cat([
         t_vals[:, 1:] - t_vals[:, :-1],
         torch.full((B, 1), 1e-2, device=flat_o.device)
     ], dim=-1)  # [B, S]
-    sigma = s_val * torch.sigmoid(-sdf_r * s_val)
-    alpha = 1.0 - torch.exp(-sigma * dists)      # [B, S]
+
+    if alpha_mode == "neus":
+        alpha = get_alpha_neus(sdf_r, s_val)
+    else:
+        alpha = get_alpha_volsdf(sdf_r, s_val, dists)
 
     # Transmittance & 体渲染
     transmittance = torch.cumprod(
@@ -188,19 +184,17 @@ def evaluate(args, sdf_net, color_net, test_dataset, device, step, logger, lr, l
     rays_o = train_item["rays_o"].to(device)
     rays_d = train_item["rays_d"].to(device)
 
-    # 使用当前训练的 s 值（而非最终目标 s_val），保证 evaluate 和 train 一致
-    eval_s = s_curr if s_curr is not None else args.s_val
-
+    # 使用当前训练的 s 值，保证 evaluate 和 train 一致
     rgb_pred, _, _ = render_rays_sdf(
         sdf_net, color_net, rays_o, rays_d,
-        near=args.near, far=args.far, n_samples=args.n_samples, s_val=eval_s,
-        compute_eikonal=False, normal_mode=args.normal_mode
+        near=args.near, far=args.far, n_samples=args.n_samples, s_val=s_curr,
+        compute_eikonal=False, alpha_mode=args.alpha_mode
     )
 
     psnr = logger.evaluate_and_log(
         step, rgb_pred, target_img, lr,
         loss_eikonal=loss_eikonal_val,
-        s_val=eval_s if isinstance(eval_s, (int, float)) else eval_s.item(),
+        s_val=s_curr.item() if isinstance(s_curr, torch.Tensor) else s_curr,
         sdf_net=sdf_net, device=device
     )
 
@@ -241,13 +235,24 @@ def train(args):
     os.makedirs(args.exp_dir, exist_ok=True)
 
     def update_lr(step):
-        decay_rate = 0.01
-        new_lr = args.lr * (decay_rate ** (step / args.n_iters))
+        """NeuS 官方 Cosine Annealing + Warmup 学习率调度。
+
+        Warmup 阶段（step < warm_up_end）：lr 从 0 线性增长到 args.lr
+        退火阶段（step >= warm_up_end）：Cosine annealing 衰减到 args.lr * lr_alpha
+
+        与官方唯一差异：originally官方 s_cost 组的 base=10，此处保留。
+        """
+        if step < args.warm_up_end:
+            factor = step / args.warm_up_end                         # 线性增长 0→1
+        else:
+            progress = (step - args.warm_up_end) / (args.n_iters - args.warm_up_end)
+            factor = (np.cos(np.pi * progress) + 1.0) * 0.5 * (1 - args.lr_alpha) + args.lr_alpha
+
+        new_lr = args.lr * factor
         for pg in optimizer.param_groups:
             pg['lr'] = new_lr * pg['base']
         return new_lr
 
-    last_eikonal = 0.0
     n_train = len(train_dataset)
     pbar = tqdm(range(args.n_iters), desc="SDF Training")
 
@@ -268,7 +273,7 @@ def train(args):
             sdf_net, color_net, rays_o, rays_d,
             near=args.near, far=args.far,
             n_samples=args.n_samples, s_val=s_curr,
-            use_random_sample=True, normal_mode=args.normal_mode
+            use_random_sample=True, alpha_mode=args.alpha_mode
         )
 
         # Loss（target_rgb 已是 [B, 3]，与 rgb_pred [B, 3] 对应）
@@ -314,21 +319,22 @@ def main():
     parser.add_argument("--data_path", type=str, default="../data/tiny_nerf_data.npz")
     parser.add_argument("--exp_dir", type=str, default="./runs/sdf_default")
     parser.add_argument("--n_iters", type=int, default=10000)
-    parser.add_argument("--batch_size", type=int, default=512,
-                        help="每步随机采样的射线数（NeuS 官方默认 512，越大越慢但梯度更稳）")
+    parser.add_argument("--batch_size", type=int, default=512, help="每步随机采样的射线数")
     parser.add_argument("--lr", type=float, default=5e-4)
+    parser.add_argument("--warm_up_end", type=int, default=5000, help="前n步从0线性增加到args.lr")
+    parser.add_argument("--lr_alpha", type=float, default=0.05, help="Cosine annealing最终衰减比例（lr * lr_alpha）")
     parser.add_argument("--n_samples", type=int, default=64)
     parser.add_argument("--near", type=float, default=0.1)
     parser.add_argument("--far", type=float, default=2.2)
     parser.add_argument("--init_radius", type=float, default=0.5, help="初始球体 SDF 半径")
-    parser.add_argument("--s_val", type=float, default=50.0, help="SDF→alpha 的 s 参数（最终值）")
-    parser.add_argument("--s_val_init", type=float, default=5.0, help="SDF→alpha 的 s 参数（初始值）")
+    parser.add_argument("--alpha_mode", type=str, default="volsdf",
+                        choices=["volsdf", "neus"],
+                        help="SDF→alpha 方式: volsdf=密度式(收敛稳), neus=CDF式(表面锐利)")
+    parser.add_argument("--s_val_init", type=float, default=10.0,
+                        help="s 参数初始值（volsdf 推荐 10，neus 推荐 3~5）")
     parser.add_argument("--eikonal_weight", type=float, default=0.1, help="Eikonal Loss 权重")
     parser.add_argument("--display_int", type=int, default=500)
     parser.add_argument("--device", type=str, default="auto")
-    parser.add_argument("--normal_mode", type=str, default="autograd",
-                        choices=["autograd", "finite_diff"],
-                        help="法线计算方式: autograd=精确梯度(H20推荐), finite_diff=有限差分(P800推荐)")
     args = parser.parse_args()
     train(args)
 
