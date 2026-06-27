@@ -15,23 +15,46 @@ pip install -r requirements.txt
 使用仅2D图片，预测d->sigma的方式进行训练，复用NeRF的训练集，放在公共路径下的`tiny_nerf_data.npz`。
 
 ### 模型训练
+- 在H20上训练10w个iter消耗大约55分钟
+
 ```shell
 # shell脚本
 bash train.sh
 
 # python命令
 python train.py \
-    --init_radius 1.0 \
-    --s_val_init 3.0 \
-    --eikonal_weight 0.5 \
+    --init_radius 0.8 \
+    --alpha_mode volsdf \
+    --s_val_init 10.0 \
+    --eikonal_weight 0.1 \
     --n_samples 128 \
-    --n_iters 20000 \
-    --display_int 500 \
+    --batch_size 512 \
+    --n_iters 100000 \
+    --warm_up_end 5000 \
+    --lr_alpha 0.05 \
+    --display_int 1000 \
     --exp_dir ./runs/demo01 \
     --device mps
 ```
 
 ### 模型推理
+```shell
+python extract_mesh.py \
+    --ckpt ./runs/demo01/sdf_final.pth \
+    --init_radius 0.8 \
+    --resolution 256 \
+    --bound 1.0 \
+    --fmt obj
+```
+可以生成：
+- x/y/z=0时候的SDF slice结果，理论上看到的是小挖机的三视图
+- 从3个不同视角看小挖机的Mesh渲染
+- 由多个视角组成的Mesh结果和对应着色结果的gif
+
+![example](examples/demo04_sdf_slice.png)
+![example](examples/demo04_mesh.png)
+![example](examples/demo04_mesh_360.gif)
+
 
 # 踩坑记录
 
@@ -58,7 +81,8 @@ python train.py \
 ### 训练初期SDF输出结果范围迅速偏离
 - 现象：通过正确的初始化后，SDF网络的输出结果范围应该在[-0.7, 1.2]左右。-0.7表示采样到了物体内部距离外壳0.7的点，1.2表示采样到了物体外部距离物体表面1.2的点
 但部分随机初始化的结果会出现iter=200的时候，SDF输出范围迅速突变到只有正数，例如[2, 10]。导致渲染结果全程全黑色
-- 原因：
+- 原因：后来查出来发现是network中加上距离先验知识的模型结构有问题。
+- 解决方案：使用原文的几何初始化来替代直接加先验知识的模型结果让network的初始化结果符合需求。
 
 # 经验教训
 
@@ -117,7 +141,8 @@ sdf = sdf_raw + torch.norm(x, dim=-1, keepdim=True) - self.init_radius
 - 梯度方向依赖于位置，而不是物体形状。因为x对于torch.norm(x)求导后会产生一个朝向原点的单位向量，
 和实际物体表面法线无关，导致了Eikonal Loss的虚假繁荣
 
-参考了论文的方案后，采用了：
+参考了论文的方案后，采用了几何初始化方案，核心思想是通过设置合适的初始化参数（而非改变模型结构）来实现初始化后SDF网络的预测值约等于输入点距离远点的长度 - 预设物体半径。
+
 
 
 
