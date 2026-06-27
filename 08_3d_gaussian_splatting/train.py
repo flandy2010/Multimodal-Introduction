@@ -119,17 +119,19 @@ def train(args):
             loss.backward()
 
         viewspace_points = gaussians.get("viewspace_points", None)
-        radii = gaussians.get("radii", None)  # [N] 像素单位，gsplat 路径才有
+        radii = gaussians.get("radii", None)  # [N] int32，gsplat 路径才有
 
         # --- D. 更新 max_radii2D（屏幕空间最大半径，供 densify 时剪枝用）---
-        # 原论文：每步渲染后对可见点取 max，累积历史最大值
         if radii is not None and step < strategy.densify_until_iter:
             with torch.no_grad():
-                visibility = radii > 0
-                r = radii.float()
-                cur = model.max_radii2D.to(r.device)
-                cur[visibility] = torch.max(cur[visibility], r[visibility])
-                model.max_radii2D = cur.cpu()
+                r = radii.view(-1).float()  # 确保是 1D float
+                # max_radii2D 始终和 r 放在同一设备上做计算
+                if model.max_radii2D.device != r.device:
+                    model.max_radii2D = model.max_radii2D.to(r.device)
+                visibility = r > 0
+                model.max_radii2D[visibility] = torch.max(
+                    model.max_radii2D[visibility], r[visibility]
+                )
 
         # --- E. 密度策略 ---
         optimizer = strategy.step(step, model, optimizer, c2w=c2w,

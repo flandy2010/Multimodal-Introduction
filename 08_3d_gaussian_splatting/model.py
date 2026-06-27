@@ -511,7 +511,7 @@ class GaussianModel(nn.Module):
         device = self.gauss_params["means"].device
         self._grad_accum = torch.zeros(self.num_points, device=device)
         self._grad_count = torch.zeros(self.num_points, device=device)
-        self.max_radii2D  = torch.zeros(self.num_points)   # 重置，densify 后重新积累
+        self.max_radii2D  = torch.zeros(self.num_points, device=device)  # 设备对齐
 
         # ==================== 7. 选项A：彻底销毁旧优化器 + 重建新优化器 ====================
         # 7.1 将旧优化器中所有参数的梯度置 None（释放梯度显存）
