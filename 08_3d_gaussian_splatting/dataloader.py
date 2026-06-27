@@ -137,21 +137,23 @@ class GSDataLoader:
         return xyzs, rgbs
 
     def load_images(self):
-        # 懒加载：只记录图片路径，不预先解码进内存。
-        # 原来 330 张 float32 约占 4GB，现在降为 0。
+        # 预加载所有图片到 CPU 内存，避免训练时每步从磁盘读取（381ms/步 → <1ms/步）
+        # factor=4 时：173张 × 12.4MB ≈ 2.1GB，内存完全可接受
         img_dir = self.path / f"images_{self.factor}"
         if not img_dir.exists():
             img_dir = self.path / "images"
         self._img_dir = img_dir
-        # 返回路径列表，长度与 img_names 对齐，供 __len__ 等使用
-        return list(range(len(self.img_names)))
+
+        images = []
+        for name in self.img_names:
+            img = Image.open(img_dir / name).convert("RGB")
+            img = img.resize((self.W, self.H), Image.LANCZOS)
+            images.append(torch.from_numpy(np.array(img)).float() / 255.0)
+        return images
 
     def get_view_params(self, index):
-        # 按需加载单张图片，float32 转换在此完成（单张约 12MB，用完即释放）
-        name = self.img_names[index]
-        img = Image.open(self._img_dir / name).convert("RGB")
-        img = img.resize((self.W, self.H), Image.LANCZOS)
-        image = torch.from_numpy(np.array(img)).float() / 255.0
+        # 直接从预加载缓存取，无磁盘IO
+        image = self.images[index]
 
         c2w = torch.eye(4)
         c2w[:3, :4] = self.poses[index]
