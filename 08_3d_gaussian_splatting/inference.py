@@ -3,8 +3,8 @@ import argparse
 import numpy as np
 from PIL import Image
 import torch
+from tqdm import tqdm
 
-from dataloader import GSDataLoader
 from model import GaussianModel
 from renderer import auto_rasterizer
 
@@ -17,55 +17,6 @@ def resolve_device(device_arg: str) -> torch.device:
     if torch.backends.mps.is_available():
         return torch.device("mps")
     return torch.device("cpu")
-
-
-def _to_c2w_4x4(pose_3x4: torch.Tensor) -> torch.Tensor:
-    c2w = torch.eye(4, dtype=pose_3x4.dtype)
-    c2w[:3, :4] = pose_3x4
-    return c2w
-
-
-def _orthonormalize_rotation(r: torch.Tensor) -> torch.Tensor:
-    u, _, v = torch.linalg.svd(r)
-    r_ortho = u @ v
-    if torch.linalg.det(r_ortho) < 0:
-        u[:, -1] *= -1
-        r_ortho = u @ v
-    return r_ortho
-
-
-def interpolate_c2w(c2w_a: torch.Tensor, c2w_b: torch.Tensor, alpha: float) -> torch.Tensor:
-    r_a = c2w_a[:3, :3]
-    r_b = c2w_b[:3, :3]
-    t_a = c2w_a[:3, 3]
-    t_b = c2w_b[:3, 3]
-
-    r = _orthonormalize_rotation((1.0 - alpha) * r_a + alpha * r_b)
-    t = (1.0 - alpha) * t_a + alpha * t_b
-
-    out = torch.eye(4, dtype=c2w_a.dtype)
-    out[:3, :3] = r
-    out[:3, 3] = t
-    return out
-
-
-def build_walk_path_from_dataset_poses(poses_3x4: torch.Tensor, n_frames: int) -> list[torch.Tensor]:
-    if n_frames <= 0:
-        raise ValueError("n_frames 必须 > 0")
-
-    n_cam = poses_3x4.shape[0]
-    if n_cam < 2:
-        return [_to_c2w_4x4(poses_3x4[0]) for _ in range(n_frames)]
-
-    c2ws = [_to_c2w_4x4(poses_3x4[i]) for i in range(n_cam)]
-    out = []
-    for k in range(n_frames):
-        x = (k / max(1, n_frames)) * n_cam
-        i0 = int(np.floor(x)) % n_cam
-        i1 = (i0 + 1) % n_cam
-        a = float(x - np.floor(x))
-        out.append(interpolate_c2w(c2ws[i0], c2ws[i1], a))
-    return out
 
 
 def infer_model_shape(ckpt: dict) -> tuple[int, int]:
@@ -90,20 +41,99 @@ def load_checkpoint(path: str) -> dict:
     raise TypeError("checkpoint 格式不支持，期望是 state_dict 或包含 state_dict 的 dict")
 
 
+def estimate_scene_center_and_radius(ckpt_state: dict) -> tuple[torch.Tensor, float]:
+    means = ckpt_state["gauss_params.means"].float()  # [N, 3]
+
+    raw_op = ckpt_state.get("gauss_params.opacities", None)
+    if raw_op is not None:
+        weights = torch.sigmoid(raw_op.float().squeeze()).clamp_min(1e-6)
+    else:
+        weights = torch.ones(means.shape[0], dtype=torch.float32)
+
+    center = (means * weights[:, None]).sum(dim=0) / weights.sum()
+
+    dist = torch.norm(means - center[None, :], dim=-1)
+    radius_p90 = torch.quantile(dist, 0.90).item()
+    radius = max(radius_p90, 0.3)
+    return center, radius
+
+
+def make_intrinsics(width: int, height: int, fov_deg: float, device: torch.device) -> torch.Tensor:
+    fov_rad = np.deg2rad(fov_deg)
+    fx = 0.5 * width / np.tan(0.5 * fov_rad)
+    fy = fx
+    cx, cy = width * 0.5, height * 0.5
+
+    K = torch.tensor(
+        [[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]],
+        dtype=torch.float32,
+        device=device,
+    )
+    return K
+
+
+def normalize(v: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+    return v / (torch.norm(v) + eps)
+
+
+def look_at_c2w(eye: torch.Tensor, target: torch.Tensor, up_hint: torch.Tensor) -> torch.Tensor:
+    forward = normalize(target - eye)
+    right = torch.cross(forward, up_hint, dim=0)
+    if torch.norm(right) < 1e-6:
+        alt_up = torch.tensor([0.0, 0.0, 1.0], dtype=torch.float32, device=eye.device)
+        right = torch.cross(forward, alt_up, dim=0)
+    right = normalize(right)
+    up = normalize(torch.cross(right, forward, dim=0))
+
+    c2w = torch.eye(4, dtype=torch.float32, device=eye.device)
+    c2w[:3, 0] = right
+    c2w[:3, 1] = up
+    c2w[:3, 2] = -forward
+    c2w[:3, 3] = eye
+    return c2w
+
+
+def build_orbit_poses(
+    center: torch.Tensor,
+    scene_radius: float,
+    n_frames: int,
+    orbit_scale: float,
+    height_ratio: float,
+) -> list[torch.Tensor]:
+    orbit_r = scene_radius * orbit_scale
+    height = scene_radius * height_ratio
+    up_hint = torch.tensor([0.0, 1.0, 0.0], dtype=torch.float32, device=center.device)
+
+    poses = []
+    angles = torch.linspace(0.0, 2.0 * np.pi, steps=n_frames + 1, device=center.device)[:-1]
+    for theta in angles:
+        eye = center + torch.tensor(
+            [orbit_r * torch.cos(theta), height, orbit_r * torch.sin(theta)],
+            dtype=torch.float32,
+            device=center.device,
+        )
+        poses.append(look_at_c2w(eye, center, up_hint))
+    return poses
+
+
 def render_walkthrough(args):
     device = resolve_device(args.device)
     print(f"[Info] device: {device}")
 
-    loader = GSDataLoader(args.data_path, factor=args.factor, max_init_points=-1)
-    scene_radius = loader.get_normalization_params()["radius"]
-
     ckpt_state = load_checkpoint(args.model_path)
     num_points, sh_degree = infer_model_shape(ckpt_state)
+    center, scene_radius = estimate_scene_center_and_radius(ckpt_state)
+    center = center.to(device)
+
     print(f"[Info] checkpoint points={num_points}, sh_degree={sh_degree}")
+    print(f"[Info] estimated center={center.tolist()}, scene_radius≈{scene_radius:.4f}")
+
+    K = make_intrinsics(args.width, args.height, args.fov_deg, device)
+    focal = float(K[0, 0].item())
 
     model = GaussianModel(
-        fx=loader.focal,
-        fy=loader.focal,
+        fx=focal,
+        fy=focal,
         num_points=num_points,
         radius=scene_radius,
         sh_degree=sh_degree,
@@ -114,13 +144,18 @@ def render_walkthrough(args):
     model.eval()
     model.active_sh_degree = model.sh_degree
 
-    K = loader.K.to(device)
-    c2w_list = build_walk_path_from_dataset_poses(loader.poses, args.n_frames)
+    c2w_list = build_orbit_poses(
+        center=center,
+        scene_radius=scene_radius,
+        n_frames=args.n_frames,
+        orbit_scale=args.orbit_scale,
+        height_ratio=args.height_ratio,
+    )
 
     frames = []
     with torch.no_grad():
-        for i, c2w in enumerate(c2w_list):
-            c2w = c2w.to(device)
+        progress = tqdm(c2w_list, desc="正在渲染360°环绕视角帧", unit="frame")
+        for c2w in progress:
             w2c = torch.inverse(c2w)
             camera_pos = c2w[:3, 3]
 
@@ -129,8 +164,8 @@ def render_walkthrough(args):
                 gaussians,
                 w2c,
                 K,
-                loader.H,
-                loader.W,
+                args.height,
+                args.width,
                 tile_size=args.tile_size,
                 radius_clip=args.radius_clip,
             )
@@ -138,10 +173,10 @@ def render_walkthrough(args):
             image_np = (image.clamp(0.0, 1.0).cpu().numpy() * 255.0).astype(np.uint8)
             frames.append(Image.fromarray(image_np))
 
-            if (i + 1) % 20 == 0 or i == len(c2w_list) - 1:
-                print(f"[Render] {i + 1}/{len(c2w_list)}")
+    out_dir = os.path.dirname(args.output_gif)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
 
-    os.makedirs(os.path.dirname(args.output_gif), exist_ok=True)
     duration_ms = int(1000 / max(1, args.fps))
     frames[0].save(
         args.output_gif,
@@ -155,14 +190,18 @@ def render_walkthrough(args):
 
 
 def build_parser():
-    parser = argparse.ArgumentParser(description="Render 3DGS walkthrough GIF from trained checkpoint")
-    parser.add_argument("--data_path", type=str, required=True, help="COLMAP scene path used during training")
+    parser = argparse.ArgumentParser(description="Render 3DGS 360-degree orbit GIF from trained checkpoint")
     parser.add_argument("--model_path", type=str, required=True, help="Trained checkpoint path (e.g. runs/.../gs_final.pth)")
-    parser.add_argument("--output_gif", type=str, default="./runs/walkthrough.gif", help="Output GIF path")
+    parser.add_argument("--output_gif", type=str, default="./runs/walkthrough_orbit.gif", help="Output GIF path")
 
-    parser.add_argument("--factor", type=int, default=2, help="Image downscale factor, should match training")
-    parser.add_argument("--n_frames", type=int, default=120, help="Total frames in walkthrough")
+    parser.add_argument("--width", type=int, default=800, help="Render width")
+    parser.add_argument("--height", type=int, default=800, help="Render height")
+    parser.add_argument("--fov_deg", type=float, default=60.0, help="Horizontal FOV in degrees")
+
+    parser.add_argument("--n_frames", type=int, default=120, help="Total frames in 360-degree orbit")
     parser.add_argument("--fps", type=int, default=20, help="GIF frame rate")
+    parser.add_argument("--orbit_scale", type=float, default=2.2, help="Orbit radius = scene_radius * orbit_scale")
+    parser.add_argument("--height_ratio", type=float, default=0.15, help="Camera height offset = scene_radius * height_ratio")
 
     parser.add_argument("--tile_size", type=int, default=32, help="Render tile size")
     parser.add_argument("--radius_clip", type=float, default=0.0, help="Passed to gsplat radius_clip")
