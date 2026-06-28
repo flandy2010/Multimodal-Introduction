@@ -88,7 +88,8 @@ def look_at_c2w(eye: torch.Tensor, target: torch.Tensor, up_hint: torch.Tensor) 
     c2w = torch.eye(4, dtype=torch.float32, device=eye.device)
     c2w[:3, 0] = right
     c2w[:3, 1] = up
-    c2w[:3, 2] = -forward
+    # 与本项目 renderer 约定对齐：相机前方在 camera +Z（depth > 0 才可见）
+    c2w[:3, 2] = forward
     c2w[:3, 3] = eye
     return c2w
 
