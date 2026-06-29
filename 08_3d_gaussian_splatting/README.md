@@ -48,6 +48,25 @@ python train.py \
 ```
 
 ### 模型推理
+```shell
+# shell脚本
+# bash inference.sh
+
+EXP_DIR="${SCRIPT_DIR}/runs/h20_v5"
+python "${SCRIPT_DIR}/inference.py" \
+  --model_path "${EXP_DIR}/gs_final.pth" \
+  --output_gif "${EXP_DIR}/walkthrough_orbit.gif" \
+  --width 800 \
+  --height 800 \
+  --n_frames 120 \
+  --fps 20 \
+  --orbit_scale 1.0 \
+  --height_offset_ratio 0.0 \
+  --tile_size 32 \
+  --device cuda
+```
+可以根据数据集的视角情况，选择一个合适初始视角并且旋转360度：
+![examples](./examples/demo06_iter30000.gif)
 
 # 踩坑记录
 
